@@ -1,0 +1,72 @@
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800;900&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Poppins", ui-sans-serif, system-ui, sans-serif;
+  
+  /* Primary: Deep Burgundy */
+  --color-amber-700: #7A1F2B;
+  --color-amber-800: #62141F;
+  --color-amber-900: #490A12;
+  --color-amber-950: #300307;
+  
+  /* Accent: Warm Gold */
+  --color-amber-500: #C9963B;
+  --color-amber-600: #A87A2B;
+  --color-amber-400: #DBAE5F;
+  --color-amber-300: #ECD193;
+  --color-amber-200: #F6E5BE;
+  --color-amber-100: #FCF4DF;
+  
+  /* Background: Warm Cream */
+  --color-amber-50: #FFF9F0;
+  
+  /* Slate Overrides for Main Text and Dark Elements (Charcoal #252525) */
+  --color-slate-900: #252525;
+  --color-slate-950: #181818;
+  --color-slate-800: #353535;
+  --color-slate-700: #4D4D4D;
+  --color-slate-600: #656565;
+  --color-slate-500: #808080;
+  --color-slate-400: #9E9E9E;
+  --color-slate-300: #C2C2C2;
+  --color-slate-200: #E6E6E6;
+  --color-slate-100: #F3F3F3;
+  --color-slate-50: #FAF9F6;
+}
+
+/* Print configuration to handle both QR sheets and bills perfectly */
+@media print {
+  /* Default print for QR sheets (when printing-bill class is not on body) */
+  body:not(.printing-bill) header, 
+  body:not(.printing-bill) footer, 
+  body:not(.printing-bill) section:not(.bg-white) {
+    display: none !important;
+  }
+  body:not(.printing-bill) .bg-white {
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+  }
+
+  /* Print for Bill/Receipt */
+  body.printing-bill * {
+    visibility: hidden;
+  }
+  body.printing-bill #printable-bill,
+  body.printing-bill #printable-bill * {
+    visibility: visible;
+  }
+  body.printing-bill #printable-bill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 1.5cm;
+    background: white !important;
+    color: black !important;
+    font-size: 12px;
+  }
+}
+

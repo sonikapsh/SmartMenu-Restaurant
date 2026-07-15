@@ -1,0 +1,101 @@
+{
+  "entities": {
+    "Order": {
+      "title": "Order",
+      "description": "An order placed by a customer",
+      "type": "object",
+      "properties": {
+        "tableNumber": {
+          "type": "string",
+          "description": "Table number or 'Delivery'"
+        },
+        "orderType": {
+          "type": "string",
+          "enum": ["dine_in", "delivery"],
+          "description": "The type of order"
+        },
+        "deliveryAddress": {
+          "type": "string",
+          "description": "Delivery address"
+        },
+        "items": {
+          "type": "array",
+          "description": "Ordered items"
+        },
+        "total": {
+          "type": "number",
+          "description": "Total order amount"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Received", "Preparing", "Ready", "Completed"],
+          "description": "Order processing status"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "description": "Method used for payment"
+        },
+        "paymentId": {
+          "type": "string",
+          "description": "Transaction/payment reference ID"
+        }
+      },
+      "required": ["orderType", "items", "total", "status", "createdAt"]
+    },
+    "Reservation": {
+      "title": "Reservation",
+      "description": "A table reservation",
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string",
+          "description": "Date of reservation"
+        },
+        "time": {
+          "type": "string",
+          "description": "Time slot of reservation"
+        },
+        "table": {
+          "type": "string",
+          "description": "Table number assigned"
+        },
+        "guests": {
+          "type": "number",
+          "description": "Number of guests"
+        },
+        "name": {
+          "type": "string",
+          "description": "Customer name"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Customer phone number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["confirmed", "cancelled"],
+          "description": "Reservation status"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Reservation booking time"
+        }
+      },
+      "required": ["date", "time", "table", "guests", "name", "phone", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "orders/{orderId}": {
+      "schema": "Order",
+      "description": "Collection of all restaurant orders"
+    },
+    "reservations/{reservationId}": {
+      "schema": "Reservation",
+      "description": "Collection of table reservations"
+    }
+  }
+}

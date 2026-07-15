@@ -1,0 +1,51 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Common helper functions
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Order validation helper
+    function isValidOrder(data) {
+      return data.orderType is string && (data.orderType == 'dine_in' || data.orderType == 'delivery')
+        && data.total is number && data.total >= 0
+        && data.status is string && (data.status == 'Received' || data.status == 'Preparing' || data.status == 'Ready' || data.status == 'Completed')
+        && data.createdAt is string && data.createdAt.size() <= 100;
+    }
+
+    // Reservation validation helper
+    function isValidReservation(data) {
+      return data.date is string && data.date.size() <= 50
+        && data.time is string && data.time.size() <= 50
+        && data.table is string && data.table.size() <= 50
+        && data.guests is number && data.guests > 0
+        && data.name is string && data.name.size() <= 100
+        && data.phone is string && data.phone.size() <= 50
+        && data.status is string && (data.status == 'confirmed' || data.status == 'cancelled')
+        && data.createdAt is string && data.createdAt.size() <= 100;
+    }
+
+    // 2. Orders Rules
+    match /orders/{orderId} {
+      allow read: if true;
+      allow create: if isValidId(orderId) && isValidOrder(request.resource.data);
+      allow update: if isValidId(orderId) && isValidOrder(request.resource.data);
+      allow delete: if false;
+    }
+
+    // 3. Reservations Rules
+    match /reservations/{reservationId} {
+      allow read: if true;
+      allow create: if isValidId(reservationId) && isValidReservation(request.resource.data);
+      allow update: if isValidId(reservationId) && isValidReservation(request.resource.data);
+      allow delete: if false;
+    }
+  }
+}
