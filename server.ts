@@ -78,8 +78,15 @@ app.post("/api/payment/create-order", async (req, res) => {
 app.post("/api/admin/login", (req, res) => {
   try {
     const { email, password } = req.body;
-    const adminEmail = process.env.ADMIN_EMAIL || "admin@smartmenu.com";
-    const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
+
+    const cleanEnvVar = (val: string | undefined, defaultVal: string) => {
+      if (!val) return defaultVal;
+      // Strip any surrounding double or single quotes and trim trailing/leading spaces
+      return val.replace(/^["']|["']$/g, "").trim();
+    };
+
+    const adminEmail = cleanEnvVar(process.env.ADMIN_EMAIL, "admin@gmail.com");
+    const adminPassword = cleanEnvVar(process.env.ADMIN_PASSWORD, "admin123");
 
     if (!email || !password) {
       return res.status(400).json({ success: false, error: "Missing Email or Password" });
@@ -88,6 +95,13 @@ app.post("/api/admin/login", (req, res) => {
     if (email.toLowerCase() === adminEmail.toLowerCase() && password === adminPassword) {
       res.json({ success: true, message: "Authorized admin session successfully." });
     } else {
+      console.warn(
+        `Admin login attempt failed!\n` +
+        `- Entered Email: "${email.toLowerCase()}"\n` +
+        `- Configured Email: "${adminEmail.toLowerCase()}"\n` +
+        `- Entered Password Length: ${password.length}\n` +
+        `- Configured Password Length: ${adminPassword.length}`
+      );
       res.status(401).json({ success: false, error: "Invalid admin email or password." });
     }
   } catch (err: any) {

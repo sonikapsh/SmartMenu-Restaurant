@@ -45,7 +45,7 @@ import firebaseConfig from "../firebase-applet-config.json";
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
-const OWNER_PASSWORD = "owner123";
+const OWNER_PASSWORD = "admin123";
 const TOTAL_TABLES = 10;
 const TIME_SLOTS = [
   "11:00 AM", "11:30 AM", "12:00 PM", "12:30 PM",
@@ -807,7 +807,7 @@ export default function App() {
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Admin Email</label>
                   <input
                     type="email"
-                    placeholder="admin@smartmenu.com"
+                    placeholder="Enter email address"
                     value={adminEmail}
                     onChange={(e) => setAdminEmail(e.target.value)}
                     className="w-full px-4 py-3.5 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-600 font-bold text-xs transition-all bg-slate-50 text-slate-950 focus:bg-white placeholder-slate-400"
@@ -819,7 +819,7 @@ export default function App() {
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Secret Password</label>
                   <input
                     type="password"
-                    placeholder="Enter password (admin123)"
+                    placeholder="Enter secret password"
                     value={adminPassword}
                     onChange={(e) => setAdminPassword(e.target.value)}
                     className="w-full px-4 py-3.5 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-600 font-bold tracking-widest text-xs uppercase transition-all bg-slate-50 text-slate-950 focus:bg-white placeholder-slate-400"

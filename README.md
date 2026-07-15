@@ -18,4 +18,3 @@ View your app in AI Studio: https://ai.studio/apps/db19643b-7297-4178-b6e9-00058
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
-# SmartMenu-Restaurant
