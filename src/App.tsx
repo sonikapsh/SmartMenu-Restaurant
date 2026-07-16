@@ -25,7 +25,8 @@ import {
   TrendingUp,
   Printer,
   Receipt,
-  Menu
+  Menu,
+  Crown
 } from "lucide-react";
 import { menuData } from "./menuData";
 import { MenuItem, CartItem, Order, Reservation } from "./types";
@@ -111,6 +112,9 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string>("");
   const [selectedBillOrder, setSelectedBillOrder] = useState<Order | null>(null);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
+  const [userOrderIds, setUserOrderIds] = useState<string[]>([]);
+  const [userReservationIds, setUserReservationIds] = useState<string[]>([]);
+  const [isYourOrdersOpen, setIsYourOrdersOpen] = useState<boolean>(false);
 
   // Refs for smooth scrolling
   const menuRef = useRef<HTMLDivElement>(null);
@@ -129,6 +133,24 @@ export default function App() {
 
   // Sync state on mount: table URL check + load from Firestore
   useEffect(() => {
+    const savedOrders = localStorage.getItem("smartMenuUserOrders");
+    if (savedOrders) {
+      try {
+        setUserOrderIds(JSON.parse(savedOrders));
+      } catch (e) {
+        console.error("Error parsing user orders:", e);
+      }
+    }
+
+    const savedRes = localStorage.getItem("smartMenuUserReservations");
+    if (savedRes) {
+      try {
+        setUserReservationIds(JSON.parse(savedRes));
+      } catch (e) {
+        console.error("Error parsing user reservations:", e);
+      }
+    }
+
     // Check URL table param
     const params = new URLSearchParams(window.location.search);
     const tableParam = params.get("table");
@@ -192,6 +214,19 @@ export default function App() {
       }
     }
   }, [allOrders, currentOrder]);
+
+  // Restore the last active (non-Completed) order on page refresh/mount
+  useEffect(() => {
+    if (userOrderIds.length > 0 && allOrders.length > 0 && !currentOrder) {
+      const userOrders = allOrders.filter((o) => userOrderIds.includes(o.id));
+      if (userOrders.length > 0) {
+        const activeOrder = userOrders.find((o) => o.status !== "Completed");
+        if (activeOrder) {
+          setCurrentOrder(activeOrder);
+        }
+      }
+    }
+  }, [allOrders, userOrderIds, currentOrder]);
 
   const fetchOrdersAndReservations = async () => {
     // Handled dynamically and immediately in real-time by onSnapshot!
@@ -370,6 +405,11 @@ export default function App() {
     try {
       await setDoc(doc(db, "orders", orderId), newOrder);
       setCurrentOrder({ id: orderId, ...newOrder });
+      setUserOrderIds((prev) => {
+        const updated = [...prev, orderId];
+        localStorage.setItem("smartMenuUserOrders", JSON.stringify(updated));
+        return updated;
+      });
       setCart([]);
       setShowPaymentModal(false);
       showToast("Order placed successfully!");
@@ -501,6 +541,13 @@ export default function App() {
     try {
       await setDoc(doc(db, "reservations", resId), savedReservation);
       showToast(editReservationId ? "Reservation Updated!" : "Table Booked Successfully!");
+      if (!editReservationId) {
+        setUserReservationIds((prev) => {
+          const updated = [...prev, resId];
+          localStorage.setItem("smartMenuUserReservations", JSON.stringify(updated));
+          return updated;
+        });
+      }
       // Reset Form
       setResDate("");
       setResTime("");
@@ -626,7 +673,7 @@ export default function App() {
       </AnimatePresence>
 
       {/* ================= HEADER NAVBAR ================= */}
-      <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200/50 shadow-sm transition-all duration-300">
+      <header className="fixed top-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200/50 shadow-sm transition-all duration-300">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
           <div className="flex items-center cursor-pointer" onClick={() => { setIsAdminMode(false); window.scrollTo({ top: 0, behavior: "smooth" }); }}>
             <span className="text-3xl font-black tracking-tighter uppercase italic text-slate-900 transition-transform hover:scale-[1.01]">
@@ -636,13 +683,14 @@ export default function App() {
 
           {/* Nav links (hidden in admin mode) */}
           {!isAdminMode ? (
-            <nav className="hidden md:flex items-center gap-8 font-bold uppercase tracking-widest text-[11px] text-slate-600">
-              <button onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300">Home</button>
-              <button onClick={() => handleScrollTo(menuRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300">Menu</button>
-              <button onClick={() => handleScrollTo(bookRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300">Book Table</button>
-              <button onClick={() => handleScrollTo(aboutRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300">About</button>
-              <button onClick={() => handleScrollTo(reviewsRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300">Reviews</button>
-              <button onClick={() => handleScrollTo(contactRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300">Contact</button>
+            <nav className="hidden md:flex items-center gap-4 lg:gap-6 xl:gap-8 font-bold uppercase tracking-widest text-[11px] text-slate-600 flex-nowrap">
+              <button onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Home</button>
+              <button onClick={() => handleScrollTo(menuRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Menu</button>
+              <button onClick={() => handleScrollTo(bookRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Book Table</button>
+              <button onClick={() => handleScrollTo(aboutRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">About</button>
+              <button onClick={() => handleScrollTo(reviewsRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Reviews</button>
+              <button onClick={() => handleScrollTo(contactRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Contact</button>
+              <button onClick={() => setIsYourOrdersOpen(true)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">My Orders</button>
             </nav>
           ) : (
             <div className="text-[10px] uppercase border border-amber-700/20 text-amber-800 bg-amber-700/5 font-bold px-3.5 py-1.5 rounded-full tracking-wider flex items-center gap-2">
@@ -663,10 +711,10 @@ export default function App() {
             ) : (
               <button
                 onClick={() => setShowAdminLogin(true)}
-                className="hidden sm:flex w-10 h-10 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-amber-700 items-center justify-center transition-all border border-slate-200 shadow-sm"
+                className="hidden sm:flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-br from-amber-50 to-amber-100/40 hover:from-amber-100 hover:to-amber-200/40 text-amber-700 border border-amber-200/50 hover:border-amber-300/80 shadow-sm transition-all duration-300 hover:scale-105 active:scale-95 cursor-pointer"
                 title="Owner Login"
               >
-                <UserCheck className="w-5 h-5" />
+                <Crown className="w-4.5 h-4.5 text-amber-700 animate-pulse" />
               </button>
             )}
 
@@ -762,15 +810,24 @@ export default function App() {
                 >
                   Contact
                 </button>
+                 <button
+                  onClick={() => {
+                    setIsYourOrdersOpen(true);
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
+                >
+                  My Orders
+                </button>
                 <button
                   onClick={() => {
                     setShowAdminLogin(true);
                     setIsMobileMenuOpen(false);
                   }}
-                  className="w-full text-center py-3 bg-slate-50 border border-slate-100 text-slate-700 rounded-xl hover:text-amber-700 transition-all font-bold tracking-widest text-[9px] flex items-center justify-center gap-2 mt-2"
+                  className="w-full text-center py-3 bg-gradient-to-r from-amber-50 to-amber-100/50 border border-amber-200/60 text-amber-900 rounded-xl hover:text-amber-800 transition-all font-bold tracking-widest text-[9px] flex items-center justify-center gap-2 mt-2 shadow-sm"
                 >
-                  <UserCheck className="w-4 h-4" />
-                  Owner Login
+                  <Crown className="w-4 h-4 text-amber-700" />
+                  Owner Access
                 </button>
               </div>
             </motion.div>
@@ -845,7 +902,8 @@ export default function App() {
       </AnimatePresence>
 
       {/* ================= PRIMARY VIEWS ================= */}
-      {!isAdminMode ? (
+      <div className="pt-20">
+        {!isAdminMode ? (
         // ================= CUSTOMER PORTAL =================
         <>
           {/* ================= HERO SECTION ================= */}
@@ -1489,14 +1547,14 @@ export default function App() {
                     </p>
 
                     <div className="mt-6 space-y-4 max-h-[360px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
-                      {allReservations.filter((r) => r.status === "confirmed").length === 0 ? (
+                      {allReservations.filter((r) => r.status === "confirmed" && userReservationIds.includes(r.id)).length === 0 ? (
                         <div className="text-center py-10 border border-slate-100 rounded-2xl bg-slate-50">
                           <Users className="w-8 h-8 text-slate-300 mx-auto mb-2" />
                           <span className="block text-xs text-slate-400 font-bold uppercase tracking-wider">No table bookings logged yet.</span>
                         </div>
                       ) : (
                         allReservations
-                          .filter((r) => r.status === "confirmed")
+                          .filter((r) => r.status === "confirmed" && userReservationIds.includes(r.id))
                           .map((r) => (
                             <div
                               key={r.id}
@@ -1944,6 +2002,7 @@ export default function App() {
           </div>
         </section>
       )}
+      </div>
 
       {/* ================= FOOTER ================= */}
       <footer className="bg-slate-950 text-white border-t border-slate-900 py-16">
@@ -2017,6 +2076,117 @@ export default function App() {
           <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946C.06 5.348 5.397.01 12.008.01c3.202.001 6.212 1.246 8.477 3.513 2.262 2.268 3.507 5.28 3.505 8.484-.004 6.657-5.34 11.997-11.953 11.997-2.005-.001-3.973-.502-5.724-1.455L0 24zm6.59-4.846c1.66.986 3.296 1.481 4.964 1.483 5.482 0 9.943-4.437 9.946-9.897.002-2.643-1.026-5.131-2.898-7.005-1.871-1.872-4.364-2.9-7.01-2.902-5.485 0-9.945 4.438-9.948 9.9.001 1.768.486 3.49 1.4 5.013l-.995 3.637 3.74-.982z" />
         </svg>
       </a>
+      <AnimatePresence>
+        {isYourOrdersOpen && (
+          <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/80 backdrop-blur-sm">
+            {/* Backdrop closer */}
+            <div className="absolute inset-0 cursor-pointer" onClick={() => setIsYourOrdersOpen(false)} />
+
+            <motion.div
+              initial={{ x: "100%" }}
+              animate={{ x: 0 }}
+              exit={{ x: "100%" }}
+              transition={{ type: "tween", duration: 0.3 }}
+              className="relative w-full max-w-md bg-white text-slate-800 h-full shadow-2xl flex flex-col justify-between border-l border-slate-200"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Receipt className="w-5 h-5 text-amber-600 animate-bounce" />
+                  <h3 className="font-extrabold uppercase tracking-wider text-slate-900 text-base">Your Orders</h3>
+                </div>
+                <button
+                  onClick={() => setIsYourOrdersOpen(false)}
+                  className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-800 flex items-center justify-center transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Orders List */}
+              <div className="flex-1 overflow-y-auto p-6 space-y-4 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
+                {allOrders.filter((o) => userOrderIds.includes(o.id)).length === 0 ? (
+                  <div className="text-center py-24 space-y-3">
+                    <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+                      <Receipt className="w-6 h-6" />
+                    </div>
+                    <h5 className="font-bold uppercase tracking-wider text-slate-900">No Orders Placed Yet</h5>
+                    <p className="text-xs text-slate-400 max-w-xs mx-auto uppercase tracking-wider leading-relaxed">
+                      Your placed orders will show up here, even after refreshing the page!
+                    </p>
+                  </div>
+                ) : (
+                  allOrders
+                    .filter((o) => userOrderIds.includes(o.id))
+                    .map((order) => {
+                      const isCompleted = order.status === "Completed";
+                      return (
+                        <div
+                          key={order.id}
+                          className={`bg-slate-50 border rounded-2xl p-4.5 space-y-3.5 shadow-sm transition-all duration-300 ${
+                            isCompleted ? "border-slate-200/60 opacity-80" : "border-amber-600/40 hover:border-amber-600"
+                          }`}
+                        >
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <span className={`inline-block px-2.5 py-0.5 rounded-md text-[9px] font-bold tracking-widest uppercase mb-1.5 ${
+                                order.orderType === "delivery"
+                                  ? "bg-indigo-50 text-indigo-700 border border-indigo-200"
+                                  : "bg-amber-50 text-amber-700 border border-amber-200"
+                              }`}>
+                                {order.orderType === "delivery" ? "🚀 Delivery" : `🪑 Table ${order.tableNumber}`}
+                              </span>
+                              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-850 font-mono">{order.id}</h4>
+                              <span className="block text-[8px] text-slate-400 uppercase tracking-widest mt-0.5">{order.createdAt}</span>
+                            </div>
+                            <span className={`px-2.5 py-1 rounded-md text-[9px] font-bold uppercase tracking-widest ${
+                              order.status === "Completed"
+                                ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                : order.status === "Ready"
+                                ? "bg-teal-50 text-teal-700 border border-teal-200 animate-pulse"
+                                : order.status === "Preparing"
+                                ? "bg-amber-50 text-amber-700 border border-amber-200"
+                                : "bg-slate-100 text-slate-700 border border-slate-200"
+                            }`}>
+                              {order.status}
+                            </span>
+                          </div>
+
+                          {/* Items and Subtotal */}
+                          <div className="bg-white p-3 rounded-xl border border-slate-100 text-xs text-slate-700 space-y-1.5">
+                            {order.items.map((it, idx) => (
+                              <p key={idx} className="flex justify-between font-bold uppercase tracking-wider text-[10px]">
+                                <span className="text-slate-800">
+                                  {it.name} <span className="text-[9px] text-slate-400 font-bold">×{it.quantity}</span>
+                                </span>
+                                <span className="text-slate-900">₹{it.price * it.quantity}</span>
+                              </p>
+                            ))}
+                          </div>
+
+                          <div className="flex items-center justify-between pt-2.5 border-t border-slate-100 mt-2.5">
+                            <span className="text-sm font-bold text-slate-950">Total: ₹{order.total}</span>
+                            <button
+                              onClick={() => setSelectedBillOrder(order)}
+                              className="bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 font-bold uppercase tracking-widest text-[9px] px-3 py-1.5 rounded-xl transition-all flex items-center gap-1 shadow-sm"
+                            >
+                              <Receipt className="w-3.5 h-3.5" /> View Bill
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                )}
+              </div>
+
+              {/* Footer inside drawer */}
+              <div className="p-6 bg-slate-50 border-t border-slate-200 text-center">
+                <p className="text-[9px] uppercase tracking-widest text-slate-400 font-bold">SmartMenu Digital Kitchen Integration</p>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {isCartOpen && (
           <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/80 backdrop-blur-sm">
