@@ -647,9 +647,21 @@ export default function App() {
   };
 
   const handleScrollTo = (ref: React.RefObject<HTMLDivElement | null>) => {
-    if (ref.current) {
-      ref.current.scrollIntoView({ behavior: "smooth" });
+    if (isAdminMode) {
+      setIsAdminMode(false);
     }
+    setIsMobileMenuOpen(false);
+    setTimeout(() => {
+      if (ref.current) {
+        const headerOffset = 90;
+        const elementPosition = ref.current.getBoundingClientRect().top;
+        const offsetPosition = elementPosition + window.pageYOffset - headerOffset;
+        window.scrollTo({
+          top: Math.max(0, offsetPosition),
+          behavior: "smooth"
+        });
+      }
+    }, 100);
   };
 
   const activeReservationsCount = allReservations.filter((r) => r.status === "confirmed").length;
@@ -1010,7 +1022,7 @@ export default function App() {
           </section>
 
           {/* ================= MENU SECTION ================= */}
-          <section ref={menuRef} className="py-24 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 bg-[#FAF9F6]">
+          <section ref={menuRef} className="scroll-mt-24 py-24 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 bg-[#FAF9F6]">
             <div className="text-center max-w-xl mx-auto mb-16">
               <h2 className="text-4xl sm:text-6xl font-extrabold tracking-tight uppercase leading-tight text-slate-900">
                 Our Culinary <br /><span className="text-amber-700">Wonders</span>
@@ -1371,7 +1383,7 @@ export default function App() {
           </section>
 
           {/* ================= BOOK TABLE SECTION ================= */}
-          <section ref={bookRef} className="py-24 bg-white border-t border-slate-200/60 shadow-sm">
+          <section ref={bookRef} className="scroll-mt-24 py-24 bg-white border-t border-slate-200/60 shadow-sm">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
               <div className="text-center max-w-xl mx-auto mb-16">
                 <h2 className="text-4xl sm:text-6xl font-extrabold tracking-tight uppercase leading-tight text-slate-900">
@@ -1603,7 +1615,7 @@ export default function App() {
           </section>
 
           {/* ================= ABOUT SECTION ================= */}
-          <section ref={aboutRef} className="py-24 bg-[#FAF9F6] border-t border-slate-200/60">
+          <section ref={aboutRef} className="scroll-mt-24 py-24 bg-[#FAF9F6] border-t border-slate-200/60">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
                 <div className="relative aspect-video sm:aspect-[4/3] rounded-3xl overflow-hidden shadow-md shadow-slate-100/50 border border-slate-200/80">
@@ -1644,7 +1656,7 @@ export default function App() {
           </section>
 
           {/* ================= REVIEWS SECTION ================= */}
-          <section ref={reviewsRef} className="py-24 bg-white border-t border-slate-200/60 shadow-sm">
+          <section ref={reviewsRef} className="scroll-mt-24 py-24 bg-white border-t border-slate-200/60 shadow-sm">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
               <div className="text-center max-w-xl mx-auto mb-16">
                 <h2 className="text-4xl sm:text-6xl font-extrabold tracking-tight uppercase leading-tight text-slate-900">
@@ -1699,7 +1711,7 @@ export default function App() {
           </section>
 
           {/* ================= CONTACT SECTION ================= */}
-          <section ref={contactRef} className="py-24 bg-[#FAF9F6] border-t border-slate-200/60">
+          <section ref={contactRef} className="scroll-mt-24 py-24 bg-[#FAF9F6] border-t border-slate-200/60">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
               <div className="bg-white text-slate-800 rounded-3xl p-8 sm:p-12 border border-slate-200/80 shadow-md shadow-slate-100/50 relative overflow-hidden">
                 <div className="absolute -top-12 -right-12 w-64 h-64 bg-amber-500/5 rounded-full blur-3xl" />
