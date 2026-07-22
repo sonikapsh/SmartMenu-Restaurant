@@ -664,6 +664,19 @@ export default function App() {
     }, 100);
   };
 
+  const handleGoHome = () => {
+    if (isAdminMode) {
+      setIsAdminMode(false);
+    }
+    setIsMobileMenuOpen(false);
+    setTimeout(() => {
+      window.scrollTo({
+        top: 0,
+        behavior: "smooth"
+      });
+    }, 100);
+  };
+
   const activeReservationsCount = allReservations.filter((r) => r.status === "confirmed").length;
   const pendingOrdersCount = allOrders.filter((o) => o.status !== "Completed").length;
 
@@ -687,7 +700,7 @@ export default function App() {
       {/* ================= HEADER NAVBAR ================= */}
       <header className="fixed top-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200/50 shadow-sm transition-all duration-300">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
-          <div className="flex items-center cursor-pointer" onClick={() => { setIsAdminMode(false); window.scrollTo({ top: 0, behavior: "smooth" }); }}>
+          <div className="flex items-center cursor-pointer" onClick={handleGoHome}>
             <span className="text-3xl font-black tracking-tighter uppercase italic text-slate-900 transition-transform hover:scale-[1.01]">
               Smart<span className="text-amber-700">Menu</span>
             </span>
@@ -696,7 +709,7 @@ export default function App() {
           {/* Nav links (hidden in admin mode) */}
           {!isAdminMode ? (
             <nav className="hidden md:flex items-center gap-4 lg:gap-6 xl:gap-8 font-bold uppercase tracking-widest text-[11px] text-slate-600 flex-nowrap">
-              <button onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Home</button>
+              <button onClick={handleGoHome} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Home</button>
               <button onClick={() => handleScrollTo(menuRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Menu</button>
               <button onClick={() => handleScrollTo(bookRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Book Table</button>
               <button onClick={() => handleScrollTo(aboutRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">About</button>
@@ -769,55 +782,37 @@ export default function App() {
             >
               <div className="px-6 py-5 space-y-3.5 flex flex-col font-bold uppercase tracking-widest text-[10px] text-slate-600">
                 <button
-                  onClick={() => {
-                    window.scrollTo({ top: 0, behavior: "smooth" });
-                    setIsMobileMenuOpen(false);
-                  }}
+                  onClick={handleGoHome}
                   className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
                 >
                   Home
                 </button>
                 <button
-                  onClick={() => {
-                    handleScrollTo(menuRef);
-                    setIsMobileMenuOpen(false);
-                  }}
+                  onClick={() => handleScrollTo(menuRef)}
                   className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
                 >
                   Menu
                 </button>
                 <button
-                  onClick={() => {
-                    handleScrollTo(bookRef);
-                    setIsMobileMenuOpen(false);
-                  }}
+                  onClick={() => handleScrollTo(bookRef)}
                   className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
                 >
                   Book Table
                 </button>
                 <button
-                  onClick={() => {
-                    handleScrollTo(aboutRef);
-                    setIsMobileMenuOpen(false);
-                  }}
+                  onClick={() => handleScrollTo(aboutRef)}
                   className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
                 >
                   About
                 </button>
                 <button
-                  onClick={() => {
-                    handleScrollTo(reviewsRef);
-                    setIsMobileMenuOpen(false);
-                  }}
+                  onClick={() => handleScrollTo(reviewsRef)}
                   className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
                 >
                   Reviews
                 </button>
                 <button
-                  onClick={() => {
-                    handleScrollTo(contactRef);
-                    setIsMobileMenuOpen(false);
-                  }}
+                  onClick={() => handleScrollTo(contactRef)}
                   className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
                 >
                   Contact
