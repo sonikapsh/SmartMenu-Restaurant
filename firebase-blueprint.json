@@ -42,6 +42,10 @@
         "paymentId": {
           "type": "string",
           "description": "Transaction/payment reference ID"
+        },
+        "sessionId": {
+          "type": "string",
+          "description": "Customer session identifier for multi-user privacy isolation"
         }
       },
       "required": ["orderType", "items", "total", "status", "createdAt"]
@@ -83,6 +87,10 @@
         "createdAt": {
           "type": "string",
           "description": "Reservation booking time"
+        },
+        "sessionId": {
+          "type": "string",
+          "description": "Customer session identifier for multi-user privacy isolation"
         }
       },
       "required": ["date", "time", "table", "guests", "name", "phone", "status", "createdAt"]

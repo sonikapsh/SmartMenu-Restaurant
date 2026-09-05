@@ -1,6 +1,6 @@
 {
   "name": "SmartMenu Restaurant",
-  "description": "A digital QR-code ordering and reservation system for restaurants, allowing customers to scan a table QR, order food, and book tables, with an owner dashboard.",
+  "description": "A digital ordering platform for DELISH Cafe featuring QR-code table ordering, delivery, live order tracking, menu exploration, table reservations, and an owner management portal.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

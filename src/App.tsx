@@ -26,10 +26,12 @@ import {
   Printer,
   Receipt,
   Menu,
-  Crown
+  Crown,
+  Coffee
 } from "lucide-react";
 import { menuData } from "./menuData";
 import { MenuItem, CartItem, Order, Reservation } from "./types";
+import { DelishLogo } from "./components/DelishLogo";
 import { initializeApp } from "firebase/app";
 import {
   getFirestore,
@@ -38,7 +40,8 @@ import {
   setDoc,
   updateDoc,
   onSnapshot,
-  query
+  query,
+  where
 } from "firebase/firestore";
 import firebaseConfig from "../firebase-applet-config.json";
 
@@ -48,6 +51,30 @@ const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
 const OWNER_PASSWORD = "admin123";
 const TOTAL_TABLES = 10;
+
+// Multi-user session isolation helper:
+// Generates or retrieves a unique session identifier per customer tab/device.
+// Does NOT conflate table identity with customer identity.
+const getCustomerSessionId = (): string => {
+  if (typeof window === "undefined") return "guest";
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const urlSession = params.get("session");
+    if (urlSession && urlSession.trim().length >= 3) {
+      const cleanSession = urlSession.trim();
+      sessionStorage.setItem("delish_customer_sid", cleanSession);
+      return cleanSession;
+    }
+    let sid = sessionStorage.getItem("delish_customer_sid");
+    if (!sid) {
+      sid = "cust_" + Date.now().toString(36) + "_" + Math.random().toString(36).substring(2, 9);
+      sessionStorage.setItem("delish_customer_sid", sid);
+    }
+    return sid;
+  } catch {
+    return "cust_default";
+  }
+};
 const TIME_SLOTS = [
   "11:00 AM", "11:30 AM", "12:00 PM", "12:30 PM",
   "01:00 PM", "01:30 PM", "02:00 PM", "02:30 PM",
@@ -58,9 +85,11 @@ const TIME_SLOTS = [
 ];
 
 const HERO_IMAGES = [
-  "https://images.unsplash.com/photo-1504674900247-0877df9cc836?w=1600&auto=format&fit=crop&q=80",
-  "https://images.unsplash.com/photo-1555396273-367ea4eb4db5?w=1600&auto=format&fit=crop&q=80",
-  "https://images.unsplash.com/photo-1414235077428-338989a2e8c0?w=1600&auto=format&fit=crop&q=80"
+  "https://images.unsplash.com/photo-1554118811-1e0d58224f24?w=1600&auto=format&fit=crop&q=80",
+  "https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=1600&auto=format&fit=crop&q=80",
+  "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=1600&auto=format&fit=crop&q=80",
+  "https://images.unsplash.com/photo-1513104890138-7c749659a591?w=1600&auto=format&fit=crop&q=80",
+  "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=1600&auto=format&fit=crop&q=80"
 ];
 
 export default function App() {
@@ -70,7 +99,7 @@ export default function App() {
   const [adminEmail, setAdminEmail] = useState<string>("");
   const [adminPassword, setAdminPassword] = useState<string>("");
   const [adminLoginError, setAdminLoginError] = useState<string>("");
-  const [activeCategory, setActiveCategory] = useState<string>("Pizza");
+  const [activeCategory, setActiveCategory] = useState<string>("Coffee");
 
   // Hero slideshow state
   const [heroIndex, setHeroIndex] = useState<number>(0);
@@ -83,6 +112,7 @@ export default function App() {
   const [deliveryAddress, setDeliveryAddress] = useState<string>("");
   const [activeTableLabel, setActiveTableLabel] = useState<string>("");
   const [isUrlTable, setIsUrlTable] = useState<boolean>(false);
+  const [tableInputError, setTableInputError] = useState<string>("");
 
   // Search & Filters
   const [searchTerm, setSearchTerm] = useState<string>("");
@@ -105,6 +135,8 @@ export default function App() {
   const [resName, setResName] = useState<string>("");
   const [resPhone, setResPhone] = useState<string>("");
   const [editReservationId, setEditReservationId] = useState<string | null>(null);
+  const [isReservationModalOpen, setIsReservationModalOpen] = useState<boolean>(false);
+  const [activeReservationTab, setActiveReservationTab] = useState<"book" | "manage">("book");
 
   // Lists loaded from Backend
   const [allOrders, setAllOrders] = useState<Order[]>([]);
@@ -112,6 +144,7 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string>("");
   const [selectedBillOrder, setSelectedBillOrder] = useState<Order | null>(null);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
+  const [customerSessionId, setCustomerSessionId] = useState<string>(() => getCustomerSessionId());
   const [userOrderIds, setUserOrderIds] = useState<string[]>([]);
   const [userReservationIds, setUserReservationIds] = useState<string[]>([]);
   const [isYourOrdersOpen, setIsYourOrdersOpen] = useState<boolean>(false);
@@ -119,6 +152,7 @@ export default function App() {
   // Refs for smooth scrolling
   const menuRef = useRef<HTMLDivElement>(null);
   const bookRef = useRef<HTMLDivElement>(null);
+  const galleryRef = useRef<HTMLDivElement>(null);
   const aboutRef = useRef<HTMLDivElement>(null);
   const reviewsRef = useRef<HTMLDivElement>(null);
   const contactRef = useRef<HTMLDivElement>(null);
@@ -131,79 +165,178 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
-  // Sync state on mount: table URL check + load from Firestore
+  // Sync cart to isolated session storage whenever it updates
   useEffect(() => {
-    const savedOrders = localStorage.getItem("smartMenuUserOrders");
-    if (savedOrders) {
-      try {
+    if (!customerSessionId) return;
+    try {
+      localStorage.setItem(`delish_cart_${customerSessionId}`, JSON.stringify(cart));
+    } catch (e) {
+      console.error("Cart storage save error:", e);
+    }
+  }, [cart, customerSessionId]);
+
+  // Sync state on mount: multi-user session isolation + table QR check
+  useEffect(() => {
+    const sid = getCustomerSessionId();
+    setCustomerSessionId(sid);
+
+    // Restore isolated cart for this customer session
+    try {
+      const savedCart = localStorage.getItem(`delish_cart_${sid}`);
+      if (savedCart) {
+        const parsed = JSON.parse(savedCart);
+        if (Array.isArray(parsed)) {
+          setCart(parsed);
+        }
+      }
+    } catch (e) {
+      console.error("Error restoring session cart:", e);
+    }
+
+    // Restore isolated order IDs for this customer session
+    try {
+      const savedOrders = localStorage.getItem(`delish_orders_${sid}`);
+      if (savedOrders) {
         setUserOrderIds(JSON.parse(savedOrders));
-      } catch (e) {
-        console.error("Error parsing user orders:", e);
       }
+    } catch (e) {
+      console.error("Error parsing user orders for session:", e);
     }
 
-    const savedRes = localStorage.getItem("smartMenuUserReservations");
-    if (savedRes) {
-      try {
+    // Restore isolated reservations for this customer session
+    try {
+      const savedRes = localStorage.getItem(`delish_res_${sid}`);
+      if (savedRes) {
         setUserReservationIds(JSON.parse(savedRes));
-      } catch (e) {
-        console.error("Error parsing user reservations:", e);
       }
+    } catch (e) {
+      console.error("Error parsing user reservations for session:", e);
     }
 
-    // Check URL table param
+    // Check URL table param (Strictly 1 to TOTAL_TABLES)
     const params = new URLSearchParams(window.location.search);
     const tableParam = params.get("table");
     if (tableParam) {
-      const parsedNum = tableParam.replace(/[^0-9]/g, "");
-      if (parsedNum) {
-        setTableNumber(parsedNum);
-        setActiveTableLabel(parsedNum);
+      const parsedNum = parseInt(tableParam.replace(/[^0-9]/g, ""), 10);
+      if (!isNaN(parsedNum) && parsedNum >= 1 && parsedNum <= TOTAL_TABLES) {
+        const tStr = String(parsedNum);
+        setTableNumber(tStr);
+        setActiveTableLabel(tStr);
         setIsUrlTable(true);
         setOrderType("dine_in");
-        localStorage.setItem("smartMenuTable", parsedNum);
+        localStorage.setItem(`delish_table_${sid}`, tStr);
+
+        // Directly open/scroll to MENU smoothly, bypassing any preference screen
+        setTimeout(() => {
+          if (menuRef.current) {
+            menuRef.current.scrollIntoView({ behavior: "smooth" });
+          }
+        }, 250);
+      } else {
+        localStorage.removeItem(`delish_table_${sid}`);
+        setTableNumber("");
+        setActiveTableLabel("");
+        showToast(`Invalid table in link. Delish Cafe has Tables 1 to ${TOTAL_TABLES} only.`);
       }
     } else {
-      const saved = localStorage.getItem("smartMenuTable");
+      // Check if this customer session has a previously selected table
+      const saved = localStorage.getItem(`delish_table_${sid}`);
       if (saved) {
-        setTableNumber(saved);
-        setActiveTableLabel(saved);
+        const parsedSaved = parseInt(saved, 10);
+        if (!isNaN(parsedSaved) && parsedSaved >= 1 && parsedSaved <= TOTAL_TABLES) {
+          setTableNumber(String(parsedSaved));
+          setActiveTableLabel(String(parsedSaved));
+          setOrderType("dine_in");
+        } else {
+          localStorage.removeItem(`delish_table_${sid}`);
+          setTableNumber("");
+          setActiveTableLabel("");
+        }
       }
     }
+  }, []);
 
-    // Set up real-time orders listener
-    const qOrders = collection(db, "orders");
-    const unsubscribeOrders = onSnapshot(qOrders, (snapshot) => {
-      const orders: Order[] = [];
-      snapshot.forEach((docSnap) => {
-        orders.push({ id: docSnap.id, ...docSnap.data() } as Order);
-      });
-      // Sort newest first
-      orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setAllOrders(orders);
-    }, (error) => {
-      console.error("Firestore orders subscribe error:", error);
-    });
+  // Real-time Firestore sync with strict multi-user session isolation
+  useEffect(() => {
+    let unsubscribeOrders: () => void = () => {};
+    let unsubscribeReservations: () => void = () => {};
 
-    // Set up real-time reservations listener
-    const qReservations = collection(db, "reservations");
-    const unsubscribeReservations = onSnapshot(qReservations, (snapshot) => {
-      const reservations: Reservation[] = [];
-      snapshot.forEach((docSnap) => {
-        reservations.push({ id: docSnap.id, ...docSnap.data() } as Reservation);
-      });
-      // Sort newest first
-      reservations.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      setAllReservations(reservations);
-    }, (error) => {
-      console.error("Firestore reservations subscribe error:", error);
-    });
+    if (isAdminMode) {
+      // In Admin Mode: Staff/Kitchen needs to see all cafe orders & reservations
+      const qOrders = collection(db, "orders");
+      unsubscribeOrders = onSnapshot(
+        qOrders,
+        (snapshot) => {
+          const orders: Order[] = [];
+          snapshot.forEach((docSnap) => {
+            orders.push({ id: docSnap.id, ...docSnap.data() } as Order);
+          });
+          orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          setAllOrders(orders);
+        },
+        (error) => {
+          console.error("Firestore admin orders sync error:", error);
+        }
+      );
+
+      const qReservations = collection(db, "reservations");
+      unsubscribeReservations = onSnapshot(
+        qReservations,
+        (snapshot) => {
+          const reservations: Reservation[] = [];
+          snapshot.forEach((docSnap) => {
+            reservations.push({ id: docSnap.id, ...docSnap.data() } as Reservation);
+          });
+          reservations.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          setAllReservations(reservations);
+        },
+        (error) => {
+          console.error("Firestore admin reservations sync error:", error);
+        }
+      );
+    } else {
+      // In Customer Mode: Strict multi-user session isolation.
+      // Customer ONLY listens to orders matching their unique session identifier.
+      if (customerSessionId) {
+        const qOrders = query(collection(db, "orders"), where("sessionId", "==", customerSessionId));
+        unsubscribeOrders = onSnapshot(
+          qOrders,
+          (snapshot) => {
+            const orders: Order[] = [];
+            snapshot.forEach((docSnap) => {
+              orders.push({ id: docSnap.id, ...docSnap.data() } as Order);
+            });
+            orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            setAllOrders(orders);
+          },
+          (error) => {
+            console.error("Firestore customer orders sync error:", error);
+          }
+        );
+
+        const qReservations = collection(db, "reservations");
+        unsubscribeReservations = onSnapshot(
+          qReservations,
+          (snapshot) => {
+            const reservations: Reservation[] = [];
+            snapshot.forEach((docSnap) => {
+              reservations.push({ id: docSnap.id, ...docSnap.data() } as Reservation);
+            });
+            reservations.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            setAllReservations(reservations);
+          },
+          (error) => {
+            console.error("Firestore reservations sync error:", error);
+          }
+        );
+      }
+    }
 
     return () => {
       unsubscribeOrders();
       unsubscribeReservations();
     };
-  }, []);
+  }, [isAdminMode, customerSessionId]);
 
   // Update order status if tracked order gets updated in list
   useEffect(() => {
@@ -215,18 +348,15 @@ export default function App() {
     }
   }, [allOrders, currentOrder]);
 
-  // Restore the last active (non-Completed) order on page refresh/mount
+  // Restore the customer's own active (non-Completed) order on page refresh/mount
   useEffect(() => {
-    if (userOrderIds.length > 0 && allOrders.length > 0 && !currentOrder) {
-      const userOrders = allOrders.filter((o) => userOrderIds.includes(o.id));
-      if (userOrders.length > 0) {
-        const activeOrder = userOrders.find((o) => o.status !== "Completed");
-        if (activeOrder) {
-          setCurrentOrder(activeOrder);
-        }
+    if (allOrders.length > 0 && !currentOrder && !isAdminMode) {
+      const activeOrder = allOrders.find((o) => o.status !== "Completed");
+      if (activeOrder) {
+        setCurrentOrder(activeOrder);
       }
     }
-  }, [allOrders, userOrderIds, currentOrder]);
+  }, [allOrders, currentOrder, isAdminMode]);
 
   const fetchOrdersAndReservations = async () => {
     // Handled dynamically and immediately in real-time by onSnapshot!
@@ -239,21 +369,8 @@ export default function App() {
     }, 2500);
   };
 
-  // Cart operations
+  // Cart operations (Direct item addition)
   const handleAddToCart = (item: MenuItem) => {
-    if (orderType === "dine_in" && !activeTableLabel) {
-      showToast("Please enter or scan your Table Number first!");
-      if (menuRef.current) {
-        menuRef.current.scrollIntoView({ behavior: "smooth" });
-      }
-      return;
-    }
-
-    if (orderType === "delivery" && !deliveryAddress.trim()) {
-      showToast("Please enter your delivery address first!");
-      return;
-    }
-
     setCart((prev) => {
       const existing = prev.find((c) => c.name === item.name);
       if (existing) {
@@ -263,7 +380,7 @@ export default function App() {
       }
       return [...prev, { name: item.name, price: item.price, quantity: 1 }];
     });
-    showToast(`Added ${item.name} to Cart!`);
+    showToast(`Added ${item.name} to Tray!`);
   };
 
   const updateCartQty = (name: string, diff: number) => {
@@ -288,24 +405,36 @@ export default function App() {
   const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const cartItemCount = cart.reduce((sum, item) => sum + item.quantity, 0);
 
-  // Set table number
-  const handleSetTable = () => {
-    const trimmed = tableNumber.trim();
+  // Set table number with strict validation (Tables 1 to 10 only) and session persistence
+  const handleSetTable = (targetTable?: string) => {
+    const raw = typeof targetTable === "string" ? targetTable : tableNumber;
+    const trimmed = raw.trim();
     if (!trimmed) {
-      showToast("Please enter a valid table number.");
+      setTableInputError(`Please select or enter a table (1 to ${TOTAL_TABLES}).`);
+      showToast(`Please enter a table number (1 to ${TOTAL_TABLES}).`);
       return;
     }
-    setActiveTableLabel(trimmed);
-    localStorage.setItem("smartMenuTable", trimmed);
-    showToast(`Table ${trimmed} selected successfully!`);
+    const num = parseInt(trimmed, 10);
+    if (isNaN(num) || num < 1 || num > TOTAL_TABLES || String(num) !== trimmed.replace(/^0+/, "")) {
+      setTableInputError(`Delish Cafe has Tables 1 to ${TOTAL_TABLES} only. Table "${trimmed}" does not exist.`);
+      showToast(`Invalid table! Delish Cafe has Tables 1 to ${TOTAL_TABLES} only.`);
+      return;
+    }
+    setTableInputError("");
+    setTableNumber(String(num));
+    setActiveTableLabel(String(num));
+    setOrderType("dine_in");
+    localStorage.setItem(`delish_table_${customerSessionId}`, String(num));
+    showToast(`Table ${num} selected!`);
   };
 
   const handleClearTable = () => {
     setTableNumber("");
     setActiveTableLabel("");
+    setTableInputError("");
     setIsUrlTable(false);
-    localStorage.removeItem("smartMenuTable");
-    showToast("Table cleared.");
+    localStorage.removeItem(`delish_table_${customerSessionId}`);
+    showToast("Table disconnected.");
   };
 
   // Filter and Sort implementation
@@ -357,9 +486,12 @@ export default function App() {
       showToast("Your cart is empty!");
       return;
     }
-    if (orderType === "dine_in" && !activeTableLabel) {
-      showToast("Table number is required!");
-      return;
+    if (orderType === "dine_in") {
+      const num = parseInt(activeTableLabel, 10);
+      if (!activeTableLabel || isNaN(num) || num < 1 || num > TOTAL_TABLES) {
+        showToast(`Please select a valid table (Tables 1 to ${TOTAL_TABLES}) first!`);
+        return;
+      }
     }
     if (orderType === "delivery" && !deliveryAddress.trim()) {
       showToast("Delivery address is required!");
@@ -390,7 +522,8 @@ export default function App() {
 
   const submitOrderToBackend = async (payMethod: string, payId: string) => {
     const orderId = "ORD-" + Math.random().toString(36).substring(2, 9).toUpperCase();
-    const newOrder = {
+    const newOrder: Order = {
+      id: orderId,
       tableNumber: orderType === "dine_in" ? activeTableLabel : "Delivery",
       orderType,
       deliveryAddress: orderType === "delivery" ? deliveryAddress : "",
@@ -399,18 +532,20 @@ export default function App() {
       status: "Received" as const,
       createdAt: new Date().toLocaleString("en-US", { hour12: true }),
       paymentMethod: payMethod,
-      paymentId: payId
+      paymentId: payId,
+      sessionId: customerSessionId
     };
 
     try {
       await setDoc(doc(db, "orders", orderId), newOrder);
-      setCurrentOrder({ id: orderId, ...newOrder });
+      setCurrentOrder(newOrder);
       setUserOrderIds((prev) => {
         const updated = [...prev, orderId];
-        localStorage.setItem("smartMenuUserOrders", JSON.stringify(updated));
+        localStorage.setItem(`delish_orders_${customerSessionId}`, JSON.stringify(updated));
         return updated;
       });
       setCart([]);
+      localStorage.removeItem(`delish_cart_${customerSessionId}`);
       setShowPaymentModal(false);
       showToast("Order placed successfully!");
       
@@ -461,8 +596,8 @@ export default function App() {
         key: orderData.key_id,
         amount: orderData.amount,
         currency: "INR",
-        name: "SmartMenu Restaurant",
-        description: `Order Payment for ${orderType === "dine_in" ? "Table " + activeTableLabel : "Delivery"}`,
+        name: "Delish Cafe",
+        description: `Delish Cafe Order - ${orderType === "dine_in" ? "Table " + activeTableLabel : "Doorstep Delivery"}`,
         order_id: orderData.simulated ? undefined : orderData.order_id,
         handler: async function (paymentResponse: any) {
           const payId = paymentResponse.razorpay_payment_id || "PAY_SIM_" + Math.random().toString(36).substring(2, 9).toUpperCase();
@@ -470,12 +605,12 @@ export default function App() {
           await submitOrderToBackend(`Razorpay (${selectedPaymentMethod.toUpperCase()})`, payId);
         },
         prefill: {
-          name: "Guest Diner",
-          email: "customer@smartmenu.com",
-          contact: "9999999999"
+          name: "Delish Diner",
+          email: "guest@delishcafe.com",
+          contact: "9876543210"
         },
         theme: {
-          color: "#ea580c" // amber-600
+          color: "#3E4B2F" // Delish deep olive
         }
       };
 
@@ -527,7 +662,8 @@ export default function App() {
     }
 
     const resId = editReservationId || "RES-" + Math.random().toString(36).substring(2, 9).toUpperCase();
-    const savedReservation = {
+    const savedReservation: Reservation = {
+      id: resId,
       date: resDate,
       time: resTime,
       table: String(resTable),
@@ -535,7 +671,8 @@ export default function App() {
       name: resName,
       phone: resPhone,
       status: "confirmed" as const,
-      createdAt: new Date().toLocaleString("en-US", { hour12: true })
+      createdAt: new Date().toLocaleString("en-US", { hour12: true }),
+      sessionId: customerSessionId
     };
 
     try {
@@ -544,7 +681,7 @@ export default function App() {
       if (!editReservationId) {
         setUserReservationIds((prev) => {
           const updated = [...prev, resId];
-          localStorage.setItem("smartMenuUserReservations", JSON.stringify(updated));
+          localStorage.setItem(`delish_res_${customerSessionId}`, JSON.stringify(updated));
           return updated;
         });
       }
@@ -556,6 +693,7 @@ export default function App() {
       setResName("");
       setResPhone("");
       setEditReservationId(null);
+      setIsReservationModalOpen(false);
     } catch (err: any) {
       console.error("Firestore booking failed:", err);
       showToast("Failed to book reservation: " + err.message);
@@ -570,6 +708,8 @@ export default function App() {
     setResGuests(resv.guests);
     setResName(resv.name);
     setResPhone(resv.phone);
+    setActiveReservationTab("book");
+    setIsReservationModalOpen(true);
     if (bookRef.current) {
       bookRef.current.scrollIntoView({ behavior: "smooth" });
     }
@@ -681,7 +821,7 @@ export default function App() {
   const pendingOrdersCount = allOrders.filter((o) => o.status !== "Completed").length;
 
   return (
-    <div className="min-h-screen bg-[#FFF9F0] text-[#252525] font-sans selection:bg-amber-700 selection:text-white overflow-x-hidden">
+    <div className="min-h-screen bg-[#FAF8F3] text-[#26301C] font-sans selection:bg-[#3E4B2F] selection:text-white overflow-x-hidden">
       {/* Toast alert system */}
       <AnimatePresence>
         {toastMessage && (
@@ -689,37 +829,47 @@ export default function App() {
             initial={{ opacity: 0, y: -40, scale: 0.9 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -20, scale: 0.95 }}
-            className="fixed top-24 left-1/2 -translate-x-1/2 bg-[#1E293B] text-[#FAFAFA] px-6 py-3 rounded-full shadow-2xl z-50 flex items-center gap-3 border border-slate-800 max-w-sm"
+            className="fixed top-24 left-1/2 -translate-x-1/2 bg-[#26301C] text-[#FAF8F3] px-6 py-3 rounded-full shadow-2xl z-50 flex items-center gap-3 border border-[#C9A84E]/40 max-w-sm"
           >
-            <span className="w-2 h-2 rounded-full bg-amber-700 animate-ping"></span>
+            <span className="w-2 h-2 rounded-full bg-[#C9A84E] animate-ping"></span>
             <span className="font-bold text-xs uppercase tracking-widest">{toastMessage}</span>
           </motion.div>
         )}
       </AnimatePresence>
 
       {/* ================= HEADER NAVBAR ================= */}
-      <header className="fixed top-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200/50 shadow-sm transition-all duration-300">
+      <header className="fixed top-0 left-0 right-0 z-40 bg-[#FAF8F3]/95 backdrop-blur-md border-b border-[#C9A84E]/20 shadow-sm transition-all duration-300">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
-          <div className="flex items-center cursor-pointer" onClick={handleGoHome}>
-            <span className="text-3xl font-black tracking-tighter uppercase italic text-slate-900 transition-transform hover:scale-[1.01]">
-              Smart<span className="text-amber-700">Menu</span>
-            </span>
+          <div className="flex items-center gap-3 cursor-pointer group" onClick={handleGoHome}>
+            <DelishLogo className="w-12 h-12 shrink-0 group-hover:scale-105 transition-transform shadow-md" />
+            <div className="flex flex-col">
+              <span className="text-2xl sm:text-3xl font-serif font-black tracking-tight uppercase text-[#3E4B2F] leading-none group-hover:text-[#26301C] transition-colors">
+                DELISH
+              </span>
+              <span className="text-[9px] font-bold tracking-widest uppercase text-[#C9A84E] mt-0.5">
+                CAFE &bull; AHMEDABAD
+              </span>
+            </div>
           </div>
 
           {/* Nav links (hidden in admin mode) */}
           {!isAdminMode ? (
-            <nav className="hidden md:flex items-center gap-4 lg:gap-6 xl:gap-8 font-bold uppercase tracking-widest text-[11px] text-slate-600 flex-nowrap">
-              <button onClick={handleGoHome} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Home</button>
-              <button onClick={() => handleScrollTo(menuRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Menu</button>
-              <button onClick={() => handleScrollTo(bookRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Book Table</button>
-              <button onClick={() => handleScrollTo(aboutRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">About</button>
-              <button onClick={() => handleScrollTo(reviewsRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Reviews</button>
-              <button onClick={() => handleScrollTo(contactRef)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Contact</button>
-              <button onClick={() => setIsYourOrdersOpen(true)} className="hover:text-amber-700 transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-amber-700 hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">My Orders</button>
+            <nav className="hidden lg:flex items-center gap-5 xl:gap-7 font-bold uppercase tracking-widest text-[11px] text-[#52633E] flex-nowrap">
+              <button onClick={handleGoHome} className="hover:text-[#C9A84E] transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-[#C9A84E] hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Home</button>
+              <button onClick={() => handleScrollTo(menuRef)} className="hover:text-[#C9A84E] transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-[#C9A84E] hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Menu</button>
+              <button onClick={() => { handleScrollTo(bookRef); setActiveReservationTab("book"); setIsReservationModalOpen(true); }} className="hover:text-[#C9A84E] transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-[#C9A84E] hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Book Table</button>
+              <button onClick={() => handleScrollTo(galleryRef)} className="hover:text-[#C9A84E] transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-[#C9A84E] hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Gallery</button>
+              <button onClick={() => handleScrollTo(aboutRef)} className="hover:text-[#C9A84E] transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-[#C9A84E] hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Our Story</button>
+              <button onClick={() => handleScrollTo(reviewsRef)} className="hover:text-[#C9A84E] transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-[#C9A84E] hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Reviews</button>
+              <button onClick={() => handleScrollTo(contactRef)} className="hover:text-[#C9A84E] transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-[#C9A84E] hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap">Contact</button>
+              <button onClick={() => setIsYourOrdersOpen(true)} className="hover:text-[#C9A84E] transition-colors relative py-2 after:absolute after:bottom-0 after:left-1/2 after:-translate-x-1/2 after:w-0 after:h-[2px] after:bg-[#C9A84E] hover:after:w-full after:transition-all after:duration-300 whitespace-nowrap flex items-center gap-1.5 text-[#3E4B2F]">
+                <Receipt className="w-3.5 h-3.5 text-[#C9A84E]" />
+                My Orders
+              </button>
             </nav>
           ) : (
-            <div className="text-[10px] uppercase border border-amber-700/20 text-amber-800 bg-amber-700/5 font-bold px-3.5 py-1.5 rounded-full tracking-wider flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-700 animate-pulse"></span>
+            <div className="text-[10px] uppercase border border-[#C9A84E]/40 text-[#3E4B2F] bg-[#C9A84E]/10 font-bold px-3.5 py-1.5 rounded-full tracking-wider flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#3E4B2F] animate-pulse"></span>
               Owner Dashboard Active
             </div>
           )}
@@ -728,7 +878,7 @@ export default function App() {
             {isAdminMode ? (
               <button
                 onClick={() => setIsAdminMode(false)}
-                className="bg-slate-900 hover:bg-slate-800 text-white px-4.5 py-2.5 rounded-xl font-bold uppercase tracking-widest text-[10px] transition-all flex items-center gap-2 shadow-sm"
+                className="bg-[#3E4B2F] hover:bg-[#323E25] text-white px-4.5 py-2.5 rounded-xl font-bold uppercase tracking-widest text-[10px] transition-all flex items-center gap-2 shadow-sm"
               >
                 <ArrowLeft className="w-4 h-4" />
                 Customer View
@@ -736,22 +886,22 @@ export default function App() {
             ) : (
               <button
                 onClick={() => setShowAdminLogin(true)}
-                className="hidden sm:flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-br from-amber-50 to-amber-100/40 hover:from-amber-100 hover:to-amber-200/40 text-amber-700 border border-amber-200/50 hover:border-amber-300/80 shadow-sm transition-all duration-300 hover:scale-105 active:scale-95 cursor-pointer"
-                title="Owner Login"
+                className="hidden sm:flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-br from-[#FAF8F3] to-[#F4EFE6] hover:from-[#F4EFE6] hover:to-[#ECE4D4] text-[#C9A84E] border border-[#C9A84E]/30 shadow-sm transition-all duration-300 hover:scale-105 active:scale-95 cursor-pointer"
+                title="Cafe Owner Portal"
               >
-                <Crown className="w-4.5 h-4.5 text-amber-700 animate-pulse" />
+                <Crown className="w-4.5 h-4.5 text-[#C9A84E]" />
               </button>
             )}
 
             {!isAdminMode && (
               <button
                 onClick={() => setIsCartOpen(true)}
-                className="relative bg-amber-700 text-white px-4 sm:px-6 py-2.5 sm:py-3 rounded-full flex items-center gap-2 hover:bg-amber-800 transition-all font-bold text-[11px] tracking-wider uppercase cursor-pointer shadow-lg shadow-amber-700/15"
+                className="relative bg-[#3E4B2F] text-white px-4 sm:px-6 py-2.5 sm:py-3 rounded-full flex items-center gap-2 hover:bg-[#323E25] transition-all font-bold text-[11px] tracking-wider uppercase cursor-pointer shadow-lg shadow-[#3E4B2F]/20 border border-[#C9A84E]/30"
               >
-                <ShoppingCart className="w-3.5 h-3.5 text-white" />
-                <span className="font-bold text-[11px] sm:inline hidden">Cart</span>
+                <ShoppingCart className="w-3.5 h-3.5 text-[#FAF8F3]" />
+                <span className="font-bold text-[11px] sm:inline hidden">Tray</span>
                 {cartItemCount > 0 && (
-                  <span className="absolute -top-1 -right-1 w-5.5 h-5.5 bg-slate-950 text-white text-[9px] font-bold rounded-full flex items-center justify-center border border-white shadow-sm">
+                  <span className="absolute -top-1 -right-1 w-5.5 h-5.5 bg-[#C9A84E] text-[#26301C] text-[9px] font-black rounded-full flex items-center justify-center border-2 border-[#FAF8F3] shadow-sm">
                     {cartItemCount}
                   </span>
                 )}
@@ -762,7 +912,7 @@ export default function App() {
             {!isAdminMode && (
               <button
                 onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-                className="md:hidden w-10 h-10 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-amber-700 flex items-center justify-center transition-all border border-slate-200 shadow-sm"
+                className="lg:hidden w-10 h-10 rounded-xl bg-white hover:bg-[#F4EFE6] text-[#3E4B2F] hover:text-[#C9A84E] flex items-center justify-center transition-all border border-[#C9A84E]/20 shadow-sm"
                 title="Toggle Menu"
               >
                 {isMobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
@@ -778,63 +928,75 @@ export default function App() {
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: "auto" }}
               exit={{ opacity: 0, height: 0 }}
-              className="md:hidden border-t border-slate-100 bg-white shadow-lg overflow-hidden"
+              className="lg:hidden border-t border-[#C9A84E]/20 bg-[#FAF8F3] shadow-lg overflow-hidden"
             >
-              <div className="px-6 py-5 space-y-3.5 flex flex-col font-bold uppercase tracking-widest text-[10px] text-slate-600">
+              <div className="px-6 py-5 space-y-3.5 flex flex-col font-bold uppercase tracking-widest text-[10px] text-[#52633E]">
                 <button
                   onClick={handleGoHome}
-                  className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
+                  className="text-left py-2 hover:text-[#C9A84E] transition-colors border-b border-[#ECE4D4]"
                 >
                   Home
                 </button>
                 <button
                   onClick={() => handleScrollTo(menuRef)}
-                  className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
+                  className="text-left py-2 hover:text-[#C9A84E] transition-colors border-b border-[#ECE4D4]"
                 >
                   Menu
                 </button>
                 <button
-                  onClick={() => handleScrollTo(bookRef)}
-                  className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
+                  onClick={() => {
+                    handleScrollTo(bookRef);
+                    setActiveReservationTab("book");
+                    setIsReservationModalOpen(true);
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="text-left py-2 hover:text-[#C9A84E] transition-colors border-b border-[#ECE4D4]"
                 >
                   Book Table
                 </button>
                 <button
-                  onClick={() => handleScrollTo(aboutRef)}
-                  className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
+                  onClick={() => handleScrollTo(galleryRef)}
+                  className="text-left py-2 hover:text-[#C9A84E] transition-colors border-b border-[#ECE4D4]"
                 >
-                  About
+                  Gallery
+                </button>
+                <button
+                  onClick={() => handleScrollTo(aboutRef)}
+                  className="text-left py-2 hover:text-[#C9A84E] transition-colors border-b border-[#ECE4D4]"
+                >
+                  Our Story
                 </button>
                 <button
                   onClick={() => handleScrollTo(reviewsRef)}
-                  className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
+                  className="text-left py-2 hover:text-[#C9A84E] transition-colors border-b border-[#ECE4D4]"
                 >
                   Reviews
                 </button>
                 <button
                   onClick={() => handleScrollTo(contactRef)}
-                  className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
+                  className="text-left py-2 hover:text-[#C9A84E] transition-colors border-b border-[#ECE4D4]"
                 >
                   Contact
                 </button>
-                 <button
+                <button
                   onClick={() => {
                     setIsYourOrdersOpen(true);
                     setIsMobileMenuOpen(false);
                   }}
-                  className="text-left py-2 hover:text-amber-700 transition-colors border-b border-slate-50"
+                  className="text-left py-2 hover:text-[#C9A84E] transition-colors border-b border-[#ECE4D4] flex items-center justify-between"
                 >
-                  My Orders
+                  <span>My Orders</span>
+                  <Receipt className="w-3.5 h-3.5 text-[#C9A84E]" />
                 </button>
                 <button
                   onClick={() => {
                     setShowAdminLogin(true);
                     setIsMobileMenuOpen(false);
                   }}
-                  className="w-full text-center py-3 bg-gradient-to-r from-amber-50 to-amber-100/50 border border-amber-200/60 text-amber-900 rounded-xl hover:text-amber-800 transition-all font-bold tracking-widest text-[9px] flex items-center justify-center gap-2 mt-2 shadow-sm"
+                  className="w-full text-center py-3 bg-[#3E4B2F] text-white rounded-xl hover:bg-[#323E25] transition-all font-bold tracking-widest text-[9px] flex items-center justify-center gap-2 mt-2 shadow-sm"
                 >
-                  <Crown className="w-4 h-4 text-amber-700" />
-                  Owner Access
+                  <Crown className="w-4 h-4 text-[#C9A84E]" />
+                  Owner Portal
                 </button>
               </div>
             </motion.div>
@@ -845,60 +1007,58 @@ export default function App() {
       {/* ================= ADMIN LOGIN MODAL ================= */}
       <AnimatePresence>
         {showAdminLogin && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#26301C]/70 backdrop-blur-sm">
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white w-full max-w-md rounded-3xl p-8 shadow-2xl border border-slate-100 relative"
+              className="bg-[#FAF8F3] w-full max-w-md rounded-3xl p-8 shadow-2xl border border-[#C9A84E]/30 relative"
             >
               <button
                 onClick={() => { setShowAdminLogin(false); setAdminEmail(""); setAdminPassword(""); setAdminLoginError(""); }}
-                className="absolute top-6 right-6 w-9 h-9 rounded-full bg-slate-50 flex items-center justify-center text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors"
+                className="absolute top-6 right-6 w-9 h-9 rounded-full bg-white flex items-center justify-center text-[#52633E] hover:bg-[#F4EFE6] transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
               <div className="text-center mb-6">
-                <div className="w-12 h-12 bg-amber-50 border border-amber-100 rounded-full flex items-center justify-center mx-auto text-amber-600 mb-3">
-                  <UserCheck className="w-6 h-6" />
-                </div>
-                <h3 className="text-2xl font-bold tracking-tight text-slate-900">Owner Access</h3>
-                <p className="text-xs text-slate-500 mt-1 uppercase tracking-wider">Enter email and password to access the admin dashboard.</p>
+                <DelishLogo className="w-16 h-16 mx-auto mb-3 shadow-md" />
+                <h3 className="text-2xl font-serif font-black tracking-tight text-[#26301C]">DELISH Cafe Portal</h3>
+                <p className="text-xs text-[#52633E] mt-1 uppercase tracking-wider font-semibold">Owner & Kitchen Management Dashboard</p>
               </div>
 
               <form onSubmit={handleAdminLoginSubmit} className="space-y-4">
                 <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Admin Email</label>
+                  <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest mb-2">Admin Email</label>
                   <input
                     type="email"
                     placeholder="Enter email address"
                     value={adminEmail}
                     onChange={(e) => setAdminEmail(e.target.value)}
-                    className="w-full px-4 py-3.5 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-600 font-bold text-xs transition-all bg-slate-50 text-slate-950 focus:bg-white placeholder-slate-400"
+                    className="w-full px-4 py-3.5 border border-[#C9A84E]/30 rounded-xl focus:outline-none focus:border-[#3E4B2F] font-bold text-xs transition-all bg-white text-[#26301C] placeholder-stone-400"
                     required
                     autoFocus
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Secret Password</label>
+                  <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest mb-2">Secret Password</label>
                   <input
                     type="password"
                     placeholder="Enter secret password"
                     value={adminPassword}
                     onChange={(e) => setAdminPassword(e.target.value)}
-                    className="w-full px-4 py-3.5 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-600 font-bold tracking-widest text-xs uppercase transition-all bg-slate-50 text-slate-950 focus:bg-white placeholder-slate-400"
+                    className="w-full px-4 py-3.5 border border-[#C9A84E]/30 rounded-xl focus:outline-none focus:border-[#3E4B2F] font-bold tracking-widest text-xs uppercase transition-all bg-white text-[#26301C] placeholder-stone-400"
                     required
                   />
                 </div>
                 {adminLoginError && (
-                  <div className="p-3 bg-rose-50 text-rose-600 border border-rose-100 rounded-xl text-xs flex items-center gap-2 font-bold uppercase tracking-wider">
+                  <div className="p-3 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl text-xs flex items-center gap-2 font-bold uppercase tracking-wider">
                     <AlertCircle className="w-4 h-4 shrink-0" />
                     <span>{adminLoginError}</span>
                   </div>
                 )}
                 <button
                   type="submit"
-                  className="w-full bg-slate-950 hover:bg-slate-900 text-white font-bold uppercase tracking-widest py-4 rounded-xl transition-all hover:shadow-lg text-xs cursor-pointer"
+                  className="w-full bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest py-4 rounded-xl transition-all hover:shadow-lg text-xs cursor-pointer border border-[#C9A84E]/40"
                 >
                   Verify and Sign In
                 </button>
@@ -914,7 +1074,7 @@ export default function App() {
         // ================= CUSTOMER PORTAL =================
         <>
           {/* ================= HERO SECTION ================= */}
-          <section className="relative min-h-[92vh] flex items-center justify-center py-20 px-4 overflow-hidden bg-[#FAF9F6]">
+          <section className="relative min-h-[92vh] flex items-center justify-center py-20 px-4 overflow-hidden bg-[#FAF8F3]">
             {/* Background Slideshow */}
             <div className="absolute inset-0 z-0">
               {HERO_IMAGES.map((img, i) => (
@@ -926,40 +1086,44 @@ export default function App() {
                   style={{ backgroundImage: `url("${img}")` }}
                 />
               ))}
-              <div className="absolute inset-0 bg-gradient-to-t from-[#FAF9F6] via-[#FAF9F6]/85 to-transparent" />
+              <div className="absolute inset-0 bg-gradient-to-t from-[#FAF8F3] via-[#FAF8F3]/85 to-transparent" />
             </div>
 
-            <div className="relative z-10 max-w-4xl mx-auto text-center text-[#1E293B]">
+            <div className="relative z-10 max-w-4xl mx-auto text-center text-[#26301C]">
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.8 }}
                 className="space-y-6"
               >
-                <div className="inline-flex items-center gap-2 bg-amber-50/70 border border-amber-700/20 px-4 py-2 rounded-full text-xs sm:text-sm font-bold tracking-widest uppercase text-amber-800 shadow-sm">
-                  <Star className="w-4 h-4 fill-amber-700 text-amber-700 animate-spin" style={{ animationDuration: '6s' }} />
-                  Ahmedabad's Finest Cuisine
+                <div className="inline-flex items-center gap-2 bg-[#FAF8F3]/90 border border-[#C9A84E]/50 px-4 py-2 rounded-full text-xs font-bold tracking-widest uppercase text-[#3E4B2F] shadow-sm backdrop-blur-sm">
+                  <Star className="w-3.5 h-3.5 fill-[#C9A84E] text-[#C9A84E]" />
+                  <span>Ahmedabad's Premier Aesthetic Cafe &bull; Est. 2024</span>
                 </div>
-                <h1 className="text-5xl sm:text-8xl font-extrabold tracking-tight uppercase leading-none text-slate-900">
-                  Fresh Food Delivered <br />
-                  <span className="text-amber-700">
-                    With Love
+                <h1 className="text-5xl sm:text-7xl lg:text-8xl font-serif font-black tracking-tight leading-tight text-[#26301C]">
+                  Where Taste Meets <br />
+                  <span className="text-[#C9A84E] italic font-serif">
+                    Aesthetic
                   </span>
                 </h1>
-                <p className="text-xs sm:text-base text-slate-600 max-w-2xl mx-auto leading-relaxed uppercase tracking-wider font-semibold">
-                  Experience frictionless dining! Scan your table QR code, browse our gourmet dishes, customize toppings, and pay directly. Freshness guaranteed.
+                <p className="text-xs sm:text-sm text-[#52633E] max-w-2xl mx-auto leading-relaxed uppercase tracking-wider font-semibold">
+                  Welcome to Delish Cafe. Scan your table QR or order for express doorstep delivery. Immerse in our olive-green sanctuary with handcrafted coffees, artisanal shakes, sourdough pizzas, and gourmet bites.
                 </p>
 
                 <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
                   <button
                     onClick={() => handleScrollTo(menuRef)}
-                    className="w-full sm:w-auto bg-amber-700 hover:bg-amber-800 text-white font-bold uppercase tracking-widest text-xs py-4.5 px-10 rounded-xl transition-all cursor-pointer shadow-lg shadow-amber-700/15"
+                    className="w-full sm:w-auto bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-xs py-4.5 px-10 rounded-xl transition-all cursor-pointer shadow-lg shadow-[#3E4B2F]/20 border border-[#C9A84E]/30"
                   >
-                    Order Now & Menu
+                    Explore Menu & Order
                   </button>
                   <button
-                    onClick={() => handleScrollTo(bookRef)}
-                    className="w-full sm:w-auto bg-white hover:bg-slate-50 text-slate-800 font-bold uppercase tracking-widest text-xs py-4.5 px-8 rounded-xl border border-slate-200 transition-all cursor-pointer shadow-sm"
+                    onClick={() => {
+                      handleScrollTo(bookRef);
+                      setActiveReservationTab("book");
+                      setIsReservationModalOpen(true);
+                    }}
+                    className="w-full sm:w-auto bg-white hover:bg-[#F4EFE6] text-[#3E4B2F] font-bold uppercase tracking-widest text-xs py-4.5 px-8 rounded-xl border border-[#C9A84E]/40 transition-all cursor-pointer shadow-sm"
                   >
                     Reserve Table
                   </button>
@@ -972,8 +1136,8 @@ export default function App() {
                   <button
                     key={i}
                     onClick={() => setHeroIndex(i)}
-                    className={`w-3 h-3 rounded-full transition-all ${
-                      i === heroIndex ? "bg-amber-700 w-8" : "bg-slate-200 hover:bg-slate-300"
+                    className={`h-2.5 rounded-full transition-all ${
+                      i === heroIndex ? "bg-[#3E4B2F] w-8" : "bg-[#C9A84E]/30 hover:bg-[#C9A84E]/60 w-2.5"
                     }`}
                   />
                 ))}
@@ -982,34 +1146,34 @@ export default function App() {
           </section>
 
           {/* ================= SYSTEM HIGHLIGHTS ================= */}
-          <section className="py-16 bg-white border-y border-slate-200/60 shadow-sm">
+          <section className="py-16 bg-white border-y border-[#C9A84E]/20 shadow-sm">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-10">
                 <div className="flex items-start gap-5">
-                  <div className="w-12 h-12 rounded-2xl bg-amber-50/80 border border-amber-200/60 flex items-center justify-center text-amber-700 shrink-0 shadow-sm">
+                  <div className="w-12 h-12 rounded-2xl bg-[#FAF8F3] border border-[#C9A84E]/40 flex items-center justify-center text-[#3E4B2F] shrink-0 shadow-sm">
                     <Utensils className="w-6 h-6" />
                   </div>
                   <div>
-                    <h4 className="text-lg font-bold uppercase tracking-tight text-slate-900">Fresh Gourmet Food</h4>
-                    <p className="text-xs text-slate-500 mt-1 leading-relaxed uppercase tracking-wider font-medium">Sourced daily from selected organic farms, cooked to golden crispy perfection by top chefs.</p>
+                    <h4 className="text-lg font-serif font-bold uppercase tracking-tight text-[#26301C]">100% Pure Vegetarian</h4>
+                    <p className="text-xs text-[#52633E] mt-1 leading-relaxed uppercase tracking-wider font-semibold">Gourmet recipes crafted with farm-fresh produce, artisanal cheeses, and authentic culinary love.</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-5">
-                  <div className="w-12 h-12 rounded-2xl bg-amber-50/80 border border-amber-200/60 flex items-center justify-center text-amber-700 shrink-0 shadow-sm">
-                    <Truck className="w-6 h-6" />
+                  <div className="w-12 h-12 rounded-2xl bg-[#FAF8F3] border border-[#C9A84E]/40 flex items-center justify-center text-[#3E4B2F] shrink-0 shadow-sm">
+                    <Star className="w-6 h-6 fill-[#C9A84E]/20 text-[#C9A84E]" />
                   </div>
                   <div>
-                    <h4 className="text-lg font-bold uppercase tracking-tight text-slate-900">Express Delivery</h4>
-                    <p className="text-xs text-slate-500 mt-1 leading-relaxed uppercase tracking-wider font-medium">Supercharged logistics to deliver steaming hot, safe meals right to your doorstep under 30 minutes.</p>
+                    <h4 className="text-lg font-serif font-bold uppercase tracking-tight text-[#26301C]">Handcrafted Brews</h4>
+                    <p className="text-xs text-[#52633E] mt-1 leading-relaxed uppercase tracking-wider font-semibold">Specialty coffee beans brewed fresh by passionate baristas. From velvety lattes to chilled frappes.</p>
                   </div>
                 </div>
                 <div className="flex items-start gap-5">
-                  <div className="w-12 h-12 rounded-2xl bg-amber-50/80 border border-amber-200/60 flex items-center justify-center text-amber-700 shrink-0 shadow-sm">
-                    <Star className="w-6 h-6 fill-amber-700/10 text-amber-700" />
+                  <div className="w-12 h-12 rounded-2xl bg-[#FAF8F3] border border-[#C9A84E]/40 flex items-center justify-center text-[#3E4B2F] shrink-0 shadow-sm">
+                    <QrCode className="w-6 h-6" />
                   </div>
                   <div>
-                    <h4 className="text-lg font-bold uppercase tracking-tight text-slate-900">5-Star Customer Rating</h4>
-                    <p className="text-xs text-slate-500 mt-1 leading-relaxed uppercase tracking-wider font-medium">Consistently voted as Ahmedabad's ultimate family diner for supreme taste and unmatched convenience.</p>
+                    <h4 className="text-lg font-serif font-bold uppercase tracking-tight text-[#26301C]">Contactless Table QR</h4>
+                    <p className="text-xs text-[#52633E] mt-1 leading-relaxed uppercase tracking-wider font-semibold">Seamless in-cafe dining. Scan your table QR, customize dishes, and track kitchen prep in real time.</p>
                   </div>
                 </div>
               </div>
@@ -1017,155 +1181,62 @@ export default function App() {
           </section>
 
           {/* ================= MENU SECTION ================= */}
-          <section ref={menuRef} className="scroll-mt-24 py-24 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 bg-[#FAF9F6]">
-            <div className="text-center max-w-xl mx-auto mb-16">
-              <h2 className="text-4xl sm:text-6xl font-extrabold tracking-tight uppercase leading-tight text-slate-900">
-                Our Culinary <br /><span className="text-amber-700">Wonders</span>
+          <section ref={menuRef} className="scroll-mt-24 py-24 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 bg-[#FAF8F3]">
+            <div className="text-center max-w-2xl mx-auto mb-16">
+              <div className="inline-flex items-center gap-2 bg-[#FAF8F3] border border-[#C9A84E]/40 px-3.5 py-1.5 rounded-full text-[11px] font-bold tracking-widest uppercase text-[#3E4B2F] mb-4">
+                <Utensils className="w-3.5 h-3.5 text-[#C9A84E]" />
+                100% Pure Vegetarian Cafe Menu
+              </div>
+              <h2 className="text-4xl sm:text-6xl font-serif font-black tracking-tight uppercase leading-tight text-[#26301C]">
+                The Delish Cafe <br /><span className="text-[#C9A84E] font-serif italic">Collection</span>
               </h2>
-              <p className="text-xs uppercase tracking-widest text-slate-500 mt-3 leading-relaxed font-bold">
-                Choose your order type, specify your table or delivery address, filter by preferences, and add mouthwatering dishes to your cart.
+              <p className="text-xs uppercase tracking-widest text-[#52633E] mt-3 leading-relaxed font-bold">
+                Handcrafted coffees, artisanal shakes, freshly baked sourdough pizzas, loaded burgers, and gourmet bites. Prepared fresh to order.
               </p>
             </div>
 
-            {/* Step 1: Dine-in vs Delivery Setup */}
-            <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200/80 shadow-md shadow-slate-100/50 mb-10 max-w-4xl mx-auto">
-              <div className="flex flex-col sm:flex-row items-center gap-6 justify-between pb-6 border-b border-slate-100">
-                <div className="text-center sm:text-left">
-                  <h3 className="font-bold uppercase text-slate-900 text-lg tracking-wide">Order Preference</h3>
-                  <p className="text-xs text-slate-500 mt-1 uppercase tracking-wider">How would you like to receive your food today?</p>
-                </div>
-                <div className="bg-slate-100 p-1.5 rounded-2xl flex gap-1 w-full sm:w-auto border border-slate-200/40">
-                  <button
-                    onClick={() => setOrderType("dine_in")}
-                    className={`flex-1 sm:flex-initial flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold uppercase tracking-widest text-xs transition-all ${
-                      orderType === "dine_in"
-                        ? "bg-amber-600 text-white shadow-md"
-                        : "text-slate-500 hover:text-slate-900"
-                    }`}
-                  >
-                    <Utensils className="w-4 h-4" />
-                    Dine In / Table QR
-                  </button>
-                  <button
-                    onClick={() => setOrderType("delivery")}
-                    className={`flex-1 sm:flex-initial flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold uppercase tracking-widest text-xs transition-all ${
-                      orderType === "delivery"
-                        ? "bg-amber-600 text-white shadow-md"
-                        : "text-slate-500 hover:text-slate-900"
-                    }`}
-                  >
-                    <Truck className="w-4 h-4" />
-                    Delivery
-                  </button>
+            {/* Dine-In Indicator (Non-intrusive for table diners) */}
+            {activeTableLabel && orderType === "dine_in" && (
+              <div className="mb-8 flex justify-center">
+                <div className="inline-flex items-center gap-2.5 bg-white text-[#3E4B2F] border border-[#C9A84E]/40 px-5 py-2.5 rounded-full shadow-sm text-xs font-bold uppercase tracking-wider">
+                  <span className="text-base leading-none">🍽️</span>
+                  <span>Dine-In &bull; Table {activeTableLabel}</span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse ml-1" />
                 </div>
               </div>
-
-              <div className="pt-6">
-                {orderType === "dine_in" ? (
-                  <div className="flex flex-col md:flex-row items-stretch md:items-center gap-4 justify-between">
-                    <div className="flex-1 space-y-2">
-                      <div className="flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-                        <QrCode className="w-4 h-4 text-amber-600" />
-                        Identify Table Number
-                      </div>
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          placeholder="e.g. 3, 5, 12"
-                          value={tableNumber}
-                          onChange={(e) => setTableNumber(e.target.value)}
-                          disabled={isUrlTable}
-                          className="w-full max-w-xs px-4 py-3 border border-slate-200 rounded-xl bg-slate-50 text-slate-900 focus:outline-none focus:border-amber-600 text-sm font-bold uppercase tracking-wider transition-all placeholder-slate-400"
-                        />
-                        <button
-                          onClick={handleSetTable}
-                          disabled={isUrlTable}
-                          className="bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white font-bold uppercase tracking-widest px-6 py-3 rounded-xl text-xs transition-all shrink-0 cursor-pointer shadow-sm"
-                        >
-                          Set Table
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="md:border-l md:border-slate-100 md:pl-8 flex flex-col justify-center py-4">
-                      {activeTableLabel ? (
-                        <div className="space-y-2">
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] uppercase bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold px-2.5 py-1 rounded-md tracking-widest flex items-center gap-1.5">
-                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                              Active Ordering
-                            </span>
-                            {isUrlTable && (
-                              <span className="text-[10px] uppercase bg-amber-50 text-amber-700 border border-amber-200 font-bold px-2 py-1 rounded-md tracking-widest">
-                                QR Code Verified
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-sm font-bold text-slate-700 uppercase tracking-wider">
-                            Logged Table: <span className="text-amber-700 text-2xl font-black italic">{activeTableLabel}</span>
-                          </p>
-                          <button
-                            onClick={handleClearTable}
-                            className="text-[10px] font-bold uppercase tracking-wider text-rose-600 hover:text-rose-700 underline text-left"
-                          >
-                            Change Table / Logout
-                          </button>
-                        </div>
-                      ) : (
-                        <p className="text-xs text-slate-500 uppercase tracking-wider font-bold">
-                          No table currently registered. Please enter a table number or scan a table QR.
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest">
-                      <MapPin className="w-4 h-4 text-amber-600" />
-                      Home Delivery Address
-                    </div>
-                    <textarea
-                      placeholder="Please enter your complete street address, flat/villa number, and landmark..."
-                      value={deliveryAddress}
-                      onChange={(e) => setDeliveryAddress(e.target.value)}
-                      className="w-full px-4 py-3.5 border border-slate-200 rounded-xl bg-slate-50 text-slate-900 focus:outline-none focus:border-amber-600 text-xs font-bold uppercase tracking-widest transition-all min-h-[90px] resize-y placeholder-slate-400"
-                    />
-                  </div>
-                )}
-              </div>
-            </div>
+            )}
 
             {/* Active kitchen status tracker for client */}
             {currentOrder && (
               <motion.div
                 initial={{ opacity: 0, y: 15 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="bg-white rounded-3xl p-6 sm:p-8 border-2 border-amber-600/30 shadow-xl mb-12 max-w-4xl mx-auto flex flex-col sm:flex-row items-center gap-6 justify-between"
+                className="bg-white rounded-3xl p-6 sm:p-8 border-2 border-[#C9A84E]/50 shadow-xl mb-12 max-w-4xl mx-auto flex flex-col sm:flex-row items-center gap-6 justify-between"
               >
                 <div className="space-y-2 text-center sm:text-left">
-                  <div className="flex items-center justify-center sm:justify-start gap-2 text-amber-600 text-xs font-bold uppercase tracking-widest">
+                  <div className="flex items-center justify-center sm:justify-start gap-2 text-[#C9A84E] text-xs font-bold uppercase tracking-widest">
                     <Clock className="w-4 h-4 animate-spin" style={{ animationDuration: '4s' }} />
-                    Live Kitchen Status
+                    Live Delish Kitchen Pipeline
                   </div>
-                  <h4 className="text-lg font-bold uppercase tracking-wider text-slate-900">
-                    Order ID: <span className="text-amber-700 font-mono text-base">{currentOrder.id}</span>
+                  <h4 className="text-lg font-serif font-bold uppercase tracking-wider text-[#26301C]">
+                    Order #{currentOrder.id.slice(-6).toUpperCase()}
                   </h4>
-                  <p className="text-xs text-slate-600 uppercase tracking-wider font-semibold">
-                    Dine preference: <span className="font-bold text-slate-800">{currentOrder.tableNumber === "Delivery" ? "Delivery Order" : `Table ${currentOrder.tableNumber}`}</span> &bull; Price: <span className="text-slate-900 font-bold">₹{currentOrder.total}</span>
+                  <p className="text-xs text-[#52633E] uppercase tracking-wider font-semibold">
+                    Destination: <span className="font-bold text-[#26301C]">{currentOrder.tableNumber === "Delivery" ? "Home Delivery" : `Table ${currentOrder.tableNumber}`}</span> &bull; Total: <span className="text-[#3E4B2F] font-bold">₹{currentOrder.total}</span>
                   </p>
                 </div>
 
                 <div className="flex items-center gap-4">
                   <div className="text-right">
-                    <span className="block text-[9px] text-slate-500 uppercase font-bold tracking-widest">Kitchen Status</span>
-                    <span className={`inline-block px-3 py-1.5 rounded-full font-bold text-[10px] mt-1.5 tracking-widest uppercase ${
+                    <span className="block text-[9px] text-[#52633E] uppercase font-bold tracking-widest">Kitchen State</span>
+                    <span className={`inline-block px-3.5 py-1.5 rounded-full font-bold text-[10px] mt-1.5 tracking-widest uppercase ${
                       currentOrder.status === "Completed"
-                        ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                        ? "bg-emerald-50 text-emerald-800 border border-emerald-300"
                         : currentOrder.status === "Ready"
-                        ? "bg-teal-50 text-teal-700 border border-teal-200 animate-pulse"
+                        ? "bg-[#C9A84E]/15 text-[#3E4B2F] border border-[#C9A84E] animate-pulse"
                         : currentOrder.status === "Preparing"
-                        ? "bg-amber-50 text-amber-700 border border-amber-200"
-                        : "bg-slate-100 text-slate-700 border border-slate-200"
+                        ? "bg-amber-50 text-amber-800 border border-amber-300"
+                        : "bg-[#FAF8F3] text-[#52633E] border border-[#ECE4D4]"
                     }`}>
                       {currentOrder.status}
                     </span>
@@ -1174,7 +1245,7 @@ export default function App() {
                   {currentOrder.status === "Completed" && (
                     <button
                       onClick={() => setCurrentOrder(null)}
-                      className="bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-600 p-2 rounded-xl text-xs font-bold transition-all"
+                      className="bg-[#FAF8F3] hover:bg-[#F4EFE6] border border-[#C9A84E]/20 text-[#52633E] p-2 rounded-xl text-xs font-bold transition-all"
                       title="Dismiss completed order tracker"
                     >
                       <X className="w-4 h-4" />
@@ -1187,7 +1258,7 @@ export default function App() {
             {/* Menu navigation & searching */}
             <div className="space-y-8">
               {/* Category selector row */}
-              <div className="flex items-center overflow-x-auto pb-4 gap-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
+              <div className="flex items-center overflow-x-auto pb-4 gap-2.5 scrollbar-thin scrollbar-thumb-[#ECE4D4] scrollbar-track-transparent">
                 {menuData.map((category) => (
                   <button
                     key={category.category}
@@ -1195,10 +1266,10 @@ export default function App() {
                       setActiveCategory(category.category);
                       setSearchTerm(""); // reset search
                     }}
-                    className={`px-6 py-3.5 rounded-xl font-bold uppercase tracking-widest text-[11px] whitespace-nowrap transition-all border shrink-0 cursor-pointer ${
+                    className={`px-6 py-3.5 rounded-2xl font-bold uppercase tracking-widest text-[11px] whitespace-nowrap transition-all border shrink-0 cursor-pointer ${
                       activeCategory === category.category && !searchTerm
-                        ? "bg-amber-600 text-white border-amber-600 shadow-md scale-105"
-                        : "bg-white text-slate-600 border-slate-200 hover:text-slate-900 hover:border-slate-300 shadow-sm"
+                        ? "bg-[#3E4B2F] text-white border-[#3E4B2F] shadow-lg shadow-[#3E4B2F]/20 scale-105"
+                        : "bg-white text-[#52633E] border-[#C9A84E]/25 hover:text-[#26301C] hover:border-[#C9A84E]/50 shadow-sm"
                     }`}
                   >
                     {category.category}
@@ -1207,21 +1278,21 @@ export default function App() {
               </div>
 
               {/* Advanced controls panel */}
-              <div className="bg-white border border-slate-200/80 rounded-3xl p-6 flex flex-col md:flex-row items-center justify-between gap-6 shadow-md shadow-slate-100/50">
+              <div className="bg-white border border-[#C9A84E]/25 rounded-3xl p-6 flex flex-col md:flex-row items-center justify-between gap-6 shadow-md shadow-[#3E4B2F]/5">
                 {/* Search Bar */}
                 <div className="relative w-full md:max-w-md">
-                  <Search className="absolute left-4.5 top-1/2 -translate-y-1/2 text-slate-400 w-4 h-4" />
+                  <Search className="absolute left-4.5 top-1/2 -translate-y-1/2 text-[#52633E] w-4 h-4" />
                   <input
                     type="text"
-                    placeholder="Search dishes, ingredients or categories..."
+                    placeholder="Search coffees, pizzas, shakes, pasta..."
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
-                    className="w-full pl-11 pr-5 py-3.5 border border-slate-200 rounded-2xl bg-slate-50 focus:bg-white focus:outline-none focus:border-amber-600 text-xs font-bold uppercase tracking-wider transition-all text-slate-900 placeholder-slate-400"
+                    className="w-full pl-11 pr-5 py-3.5 border border-[#C9A84E]/30 rounded-2xl bg-[#FAF8F3] focus:bg-white focus:outline-none focus:border-[#3E4B2F] text-xs font-bold uppercase tracking-wider transition-all text-[#26301C] placeholder-stone-400"
                   />
                   {searchTerm && (
                     <button
                       onClick={() => setSearchTerm("")}
-                      className="absolute right-4.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      className="absolute right-4.5 top-1/2 -translate-y-1/2 text-[#52633E] hover:text-[#26301C]"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -1231,30 +1302,22 @@ export default function App() {
                 {/* Filters & Sorters */}
                 <div className="flex flex-wrap items-center gap-3 w-full md:w-auto justify-end">
                   {/* Veg Indicator */}
-                  <div className="bg-slate-100 border border-slate-200/40 p-1 rounded-xl flex gap-1 text-[10px] font-bold uppercase tracking-wider">
+                  <div className="bg-[#FAF8F3] border border-[#C9A84E]/20 p-1 rounded-xl flex gap-1 text-[10px] font-bold uppercase tracking-wider">
                     <button
                       onClick={() => setVegFilter("all")}
                       className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                        vegFilter === "all" ? "bg-white text-slate-800 shadow-sm border border-slate-200/50" : "text-slate-500 hover:text-slate-900"
+                        vegFilter === "all" ? "bg-white text-[#26301C] shadow-sm border border-[#C9A84E]/30" : "text-[#52633E] hover:text-[#26301C]"
                       }`}
                     >
-                      🍽 All
+                      🍽 All Items
                     </button>
                     <button
                       onClick={() => setVegFilter("veg")}
                       className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                        vegFilter === "veg" ? "bg-emerald-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-900"
+                        vegFilter === "veg" ? "bg-[#3E4B2F] text-white shadow-sm" : "text-[#52633E] hover:text-[#26301C]"
                       }`}
                     >
-                      🌱 Veg
-                    </button>
-                    <button
-                      onClick={() => setVegFilter("nonveg")}
-                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                        vegFilter === "nonveg" ? "bg-rose-600 text-white shadow-sm" : "text-slate-500 hover:text-slate-900"
-                      }`}
-                    >
-                      🍗 Non Veg
+                      🌱 Pure Veg (100%)
                     </button>
                   </div>
 
@@ -1262,12 +1325,12 @@ export default function App() {
                   <select
                     value={sortType}
                     onChange={(e) => setSortType(e.target.value as any)}
-                    className="border border-slate-200 bg-slate-50 text-slate-700 font-bold uppercase tracking-wider text-xs px-3.5 py-2.5 rounded-xl focus:outline-none focus:border-amber-600 focus:bg-white transition-all cursor-pointer"
+                    className="border border-[#C9A84E]/30 bg-[#FAF8F3] text-[#3E4B2F] font-bold uppercase tracking-wider text-xs px-3.5 py-2.5 rounded-xl focus:outline-none focus:border-[#3E4B2F] focus:bg-white transition-all cursor-pointer"
                   >
-                    <option value="none">Default Sort</option>
-                    <option value="price_asc">💰 Price: Low to High</option>
-                    <option value="price_desc">💰 Price: High to Low</option>
-                    <option value="popularity">⭐ Most Popular First</option>
+                    <option value="none">Default Ordering</option>
+                    <option value="price_asc">Price: Low to High</option>
+                    <option value="price_desc">Price: High to Low</option>
+                    <option value="popularity">⭐ Most Popular</option>
                   </select>
                 </div>
               </div>
@@ -1282,49 +1345,51 @@ export default function App() {
                       initial={{ opacity: 0, scale: 0.97 }}
                       animate={{ opacity: 1, scale: 1 }}
                       exit={{ opacity: 0, scale: 0.95 }}
-                      className="bg-white rounded-3xl border border-slate-200/60 shadow-md shadow-slate-100/50 hover:shadow-xl hover:-translate-y-1.5 hover:border-amber-600/50 transition-all duration-300 overflow-hidden flex flex-col justify-between group"
+                      className="bg-white rounded-3xl border border-[#C9A84E]/25 shadow-md shadow-[#3E4B2F]/5 hover:shadow-xl hover:-translate-y-1.5 hover:border-[#C9A84E]/60 transition-all duration-300 overflow-hidden flex flex-col justify-between group"
                     >
-                      <div className="relative aspect-video overflow-hidden border-b border-slate-100">
+                      <div className="relative aspect-video overflow-hidden border-b border-[#F4EFE6]">
                         <img
                           src={item.img}
                           alt={item.name}
+                          referrerPolicy="no-referrer"
+                          loading="lazy"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).src =
+                              "https://images.unsplash.com/photo-1554118811-1e0d58224f24?w=800&auto=format&fit=crop&q=80";
+                          }}
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                         />
                         <div className="absolute top-4 left-4 flex flex-col gap-1.5">
-                          <span className={`px-2.5 py-1 rounded-lg text-[9px] font-bold tracking-widest uppercase text-white shadow-md ${
-                            item.is_vegetarian
-                              ? "bg-emerald-600 border border-emerald-500"
-                              : "bg-rose-600 border border-rose-500"
-                          }`}>
-                            {item.is_vegetarian ? "🌱 VEG" : "🍗 NON-VEG"}
+                          <span className="px-2.5 py-1 rounded-lg text-[9px] font-bold tracking-widest uppercase text-white shadow-md bg-emerald-700 border border-emerald-600">
+                            🌱 100% PURE VEG
                           </span>
                         </div>
-                        <div className="absolute top-4 right-4 bg-amber-100 text-amber-800 border border-amber-200/60 font-bold text-[10px] px-2.5 py-1 rounded-lg shadow-md flex items-center gap-1">
-                          <Star className="w-3.5 h-3.5 fill-amber-600 text-amber-600" />
+                        <div className="absolute top-4 right-4 bg-[#FAF8F3]/95 text-[#3E4B2F] border border-[#C9A84E]/40 font-bold text-[10px] px-2.5 py-1 rounded-lg shadow-md flex items-center gap-1 backdrop-blur-sm">
+                          <Star className="w-3.5 h-3.5 fill-[#C9A84E] text-[#C9A84E]" />
                           <span>{item.popularity_score}</span>
                         </div>
                       </div>
 
                       <div className="p-6 space-y-4 flex-1 flex flex-col justify-between">
                         <div className="space-y-1.5">
-                          <h4 className="text-xl font-bold uppercase tracking-tight text-slate-900 group-hover:text-amber-600 transition-colors">
+                          <h4 className="text-xl font-serif font-bold uppercase tracking-tight text-[#26301C] group-hover:text-[#3E4B2F] transition-colors">
                             {item.name}
                           </h4>
-                          <p className="text-xs text-slate-500 leading-relaxed font-medium">
+                          <p className="text-xs text-[#52633E] leading-relaxed font-semibold">
                             {item.desc}
                           </p>
                         </div>
 
-                        <div className="flex items-center justify-between pt-4 border-t border-slate-100 mt-4">
-                          <span className="text-xl font-extrabold tracking-tight text-slate-900">
+                        <div className="flex items-center justify-between pt-4 border-t border-[#F4EFE6] mt-4">
+                          <span className="text-2xl font-serif font-black tracking-tight text-[#26301C]">
                             ₹{item.price}
                           </span>
                           <button
                             onClick={() => handleAddToCart(item)}
-                            className="bg-slate-950 hover:bg-amber-600 hover:text-white text-white font-bold uppercase tracking-widest text-[10px] px-5 py-3.5 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer flex items-center gap-1.5 shadow-sm"
+                            className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-[10px] px-5 py-3.5 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer flex items-center gap-1.5 shadow-sm border border-[#C9A84E]/30"
                           >
                             <Plus className="w-3.5 h-3.5" />
-                            Add to Cart
+                            Add to Tray
                           </button>
                         </div>
                       </div>
@@ -1334,12 +1399,12 @@ export default function App() {
               </div>
 
               {getFilteredItems().length === 0 && (
-                <div className="text-center py-20 bg-white rounded-3xl border border-slate-200/80 shadow-md shadow-slate-100/40 max-w-lg mx-auto">
-                  <div className="w-12 h-12 rounded-full bg-slate-50 border border-slate-100 text-slate-400 flex items-center justify-center mx-auto mb-3">
+                <div className="text-center py-20 bg-white rounded-3xl border border-[#C9A84E]/25 shadow-md shadow-[#3E4B2F]/5 max-w-lg mx-auto">
+                  <div className="w-12 h-12 rounded-full bg-[#FAF8F3] border border-[#C9A84E]/20 text-[#52633E] flex items-center justify-center mx-auto mb-3">
                     <Search className="w-6 h-6" />
                   </div>
-                  <h4 className="font-bold uppercase tracking-wider text-slate-900">No Dishes Found</h4>
-                  <p className="text-xs text-slate-500 mt-1 uppercase tracking-wider max-w-xs mx-auto">Try checking your spelling or matching and toggling filters.</p>
+                  <h4 className="font-serif font-bold uppercase tracking-wider text-[#26301C]">No Delish Dishes Found</h4>
+                  <p className="text-xs text-[#52633E] mt-1 uppercase tracking-wider max-w-xs mx-auto font-semibold">Try searching for other items or browse our categories above.</p>
                 </div>
               )}
 
@@ -1348,28 +1413,28 @@ export default function App() {
                 <motion.div
                   initial={{ opacity: 0, y: 15 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className="mt-12 bg-white border border-slate-200 rounded-3xl p-6 sm:p-8 flex flex-col md:flex-row items-center justify-between gap-6 shadow-xl shadow-amber-900/5 max-w-4xl mx-auto"
+                  className="mt-12 bg-white border border-[#C9A84E]/30 rounded-3xl p-6 sm:p-8 flex flex-col md:flex-row items-center justify-between gap-6 shadow-xl shadow-[#3E4B2F]/10 max-w-4xl mx-auto"
                 >
                   <div className="flex items-center gap-4 text-left">
-                    <div className="w-12 h-12 rounded-2xl bg-amber-700 text-white flex items-center justify-center shadow-lg shadow-amber-700/20 shrink-0">
+                    <div className="w-12 h-12 rounded-2xl bg-[#3E4B2F] text-white flex items-center justify-center shadow-lg shadow-[#3E4B2F]/20 shrink-0 border border-[#C9A84E]/40">
                       <ShoppingCart className="w-5 h-5" />
                     </div>
                     <div>
-                      <h4 className="font-extrabold text-sm uppercase tracking-wider text-slate-950">
-                        {cart.reduce((sum, item) => sum + item.quantity, 0)} Items Added To Your Tray
+                      <h4 className="font-serif font-bold text-base uppercase tracking-wider text-[#26301C]">
+                        {cart.reduce((sum, item) => sum + item.quantity, 0)} Gourmet Items In Tray
                       </h4>
-                      <p className="text-xs font-semibold text-slate-500 uppercase tracking-widest mt-1">
-                        Current Order Total: <span className="text-amber-700 font-black font-mono">₹{cartTotal}</span>
+                      <p className="text-xs font-semibold text-[#52633E] uppercase tracking-widest mt-1">
+                        Current Total: <span className="text-[#3E4B2F] font-serif font-black text-base">₹{cartTotal}</span>
                       </p>
                     </div>
                   </div>
                   <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
                     <button
                       onClick={() => setIsCartOpen(true)}
-                      className="w-full sm:w-auto bg-amber-700 hover:bg-amber-800 text-white font-extrabold uppercase tracking-widest text-[11px] px-8 py-4 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer shadow-lg shadow-amber-700/10 flex items-center justify-center gap-2"
+                      className="w-full sm:w-auto bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-[11px] px-8 py-4 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer shadow-lg shadow-[#3E4B2F]/20 flex items-center justify-center gap-2 border border-[#C9A84E]/40"
                     >
                       <ShoppingCart className="w-4 h-4" />
-                      View Cart & Place Order
+                      View Tray & Place Order
                     </button>
                   </div>
                 </motion.div>
@@ -1377,272 +1442,553 @@ export default function App() {
             </div>
           </section>
 
-          {/* ================= BOOK TABLE SECTION ================= */}
-          <section ref={bookRef} className="scroll-mt-24 py-24 bg-white border-t border-slate-200/60 shadow-sm">
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-              <div className="text-center max-w-xl mx-auto mb-16">
-                <h2 className="text-4xl sm:text-6xl font-extrabold tracking-tight uppercase leading-tight text-slate-900">
-                  Gourmet <br /><span className="text-amber-600">Table Booking</span>
-                </h2>
-                <p className="text-xs uppercase tracking-widest text-slate-500 mt-3 leading-relaxed font-bold">
-                  Avoid long queues! Reserve a table on specific date and hour slots. Our interactive chart checks live table availability below.
-                </p>
-              </div>
+          {/* ================= BOOK TABLE SECTION (IMAGE BANNER CARD) ================= */}
+          <section ref={bookRef} className="scroll-mt-24 py-16 sm:py-24 bg-[#FAF8F3] border-t border-[#C9A84E]/20">
+            <div className="max-w-4xl mx-auto px-4 sm:px-6">
+              <div
+                onClick={() => {
+                  setActiveReservationTab("book");
+                  setIsReservationModalOpen(true);
+                }}
+                className="group relative rounded-[2.5rem] py-16 sm:py-24 px-6 sm:px-14 text-center text-white shadow-2xl shadow-[#1A2313]/30 border-2 border-[#C9A84E]/40 overflow-hidden cursor-pointer transition-all duration-500 hover:shadow-[#1A2313]/50 hover:border-[#C9A84E]/80 hover:scale-[1.01]"
+              >
+                {/* Background Cafe Ambiance Image with dark warm overlay */}
+                <img
+                  src="https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=1600&auto=format&fit=crop&q=80"
+                  alt="Delish Cafe Table Setting"
+                  referrerPolicy="no-referrer"
+                  className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-700 brightness-[0.38] contrast-105"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-[#1B2314]/90 via-[#1B2314]/65 to-[#1B2314]/75" />
 
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-start">
-                {/* Booking form */}
-                <form onSubmit={handleBookTable} className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200/80 shadow-md shadow-slate-100/50 lg:col-span-7 space-y-6">
-                  <h3 className="text-lg font-bold uppercase tracking-wider text-slate-900 border-b border-slate-100 pb-4 flex items-center gap-2">
-                    <Calendar className="w-5 h-5 text-amber-600 animate-pulse" />
-                    {editReservationId ? "Edit Table Reservation" : "Request Slot Booking"}
-                  </h3>
+                {/* Subtle lighting accents */}
+                <div className="absolute -top-24 -right-24 w-64 h-64 rounded-full bg-[#C9A84E]/20 blur-3xl pointer-events-none" />
+                <div className="absolute -bottom-24 -left-24 w-64 h-64 rounded-full bg-[#3E4B2F]/40 blur-3xl pointer-events-none" />
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                    <div className="space-y-1.5">
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">Date Selector</label>
-                      <input
-                        type="date"
-                        min={new Date().toISOString().split("T")[0]}
-                        value={resDate}
-                        onChange={(e) => { setResDate(e.target.value); setResTable(""); }}
-                        className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-slate-50 text-slate-900 focus:outline-none focus:border-amber-600 font-bold text-sm tracking-wider transition-all"
-                        required
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">Time Slot</label>
-                      <select
-                        value={resTime}
-                        onChange={(e) => { setResTime(e.target.value); setResTable(""); }}
-                        className="w-full px-4 py-3 border border-slate-200 rounded-xl bg-slate-50 text-slate-900 focus:outline-none focus:border-amber-600 font-bold text-sm tracking-wider transition-all cursor-pointer"
-                        required
-                      >
-                        <option value="">Choose a slot</option>
-                        {TIME_SLOTS.map((slot) => (
-                          <option key={slot} value={slot}>{slot}</option>
-                        ))}
-                      </select>
-                    </div>
+                <div className="relative z-10 max-w-xl mx-auto">
+                  <div className="inline-flex items-center gap-2 bg-[#FAF8F3]/15 border border-[#C9A84E]/50 px-3.5 py-1.5 rounded-full text-[10px] font-bold tracking-widest uppercase text-[#FAF8F3] mb-4 backdrop-blur-sm shadow-sm">
+                    <Calendar className="w-3.5 h-3.5 text-[#C9A84E]" />
+                    <span>Live Table Reservations</span>
                   </div>
 
-                  {/* Interactive Table Layout selector */}
-                  <div className="space-y-3">
-                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">Select Available Tables</label>
-                    {(!resDate || !resTime) ? (
-                      <div className="p-4 bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-xl flex items-center gap-2 font-bold uppercase tracking-wider">
-                        <AlertCircle className="w-4 h-4 shrink-0" />
-                        <span>Select a <strong>Date</strong> and <strong>Time</strong> above to display available tables.</span>
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
-                        <p className="text-[10px] uppercase text-slate-500 font-bold tracking-widest">Click a free table below:</p>
-                        <div className="grid grid-cols-5 gap-3">
-                          {Array.from({ length: TOTAL_TABLES }, (_, index) => {
-                            const tableNum = String(index + 1);
-                            const isReserved = getUnavailableTables().includes(tableNum);
-                            const isSelected = resTable === tableNum;
+                  <h2 className="text-3xl sm:text-5xl md:text-[3.25rem] font-serif font-bold text-[#FAF8F3] tracking-tight leading-tight">
+                    Reserve Your Evening
+                  </h2>
 
-                            return (
-                              <button
-                                key={tableNum}
-                                type="button"
-                                disabled={isReserved}
-                                onClick={() => setResTable(tableNum)}
-                                className={`py-3.5 px-2 rounded-xl text-xs font-bold border transition-all ${
-                                  isReserved
-                                    ? "bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed line-through"
-                                    : isSelected
-                                    ? "bg-amber-600 text-white border-amber-600 shadow-md scale-105"
-                                    : "bg-slate-50 text-slate-700 border-slate-200 hover:border-amber-600 hover:text-amber-700"
-                                }`}
-                              >
-                                T {tableNum}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                  <p className="text-xs sm:text-base text-[#FAF8F3]/90 font-medium tracking-wide mt-3.5 sm:mt-4 mb-8 sm:mb-9 max-w-lg mx-auto leading-relaxed">
+                    Whether it's a date, a meet-up or a quiet break &mdash; click anywhere to book your favorite table at Delish Cafe.
+                  </p>
 
-                  {/* Guest selector */}
-                  <div className="space-y-1.5">
-                    <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">Number of Guests</label>
-                    <div className="flex items-center gap-4">
-                      <button
-                        type="button"
-                        onClick={() => setResGuests((prev) => Math.max(1, prev - 1))}
-                        className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-200 hover:bg-slate-100 flex items-center justify-center text-slate-700 transition-all font-bold cursor-pointer"
-                      >
-                        <Minus className="w-4 h-4" />
-                      </button>
-                      <span className="font-bold text-base text-slate-900 w-8 text-center">{resGuests}</span>
-                      <button
-                        type="button"
-                        onClick={() => setResGuests((prev) => Math.min(12, prev + 1))}
-                        className="w-10 h-10 rounded-xl bg-slate-50 border border-slate-200 hover:bg-slate-100 flex items-center justify-center text-slate-700 transition-all font-bold cursor-pointer"
-                      >
-                        <Plus className="w-4 h-4" />
-                      </button>
-                      <span className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">Max 12 guests per single table</span>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                    <div className="space-y-1.5">
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">Your Full Name</label>
-                      <input
-                        type="text"
-                        placeholder="John Doe"
-                        value={resName}
-                        onChange={(e) => setResName(e.target.value)}
-                        className="w-full px-4 py-3.5 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-600 text-sm font-bold uppercase tracking-wider transition-all bg-slate-50 text-slate-900 placeholder-slate-400"
-                        required
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest">Contact Number</label>
-                      <input
-                        type="tel"
-                        placeholder="+91 9999999999"
-                        value={resPhone}
-                        onChange={(e) => setResPhone(e.target.value)}
-                        className="w-full px-4 py-3.5 border border-slate-200 rounded-xl focus:outline-none focus:border-amber-600 text-sm font-bold uppercase tracking-wider transition-all bg-slate-50 text-slate-900 placeholder-slate-400"
-                        required
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex gap-3 pt-2">
+                  <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
                     <button
-                      type="submit"
-                      className="flex-1 bg-slate-950 hover:bg-slate-900 text-white font-bold uppercase tracking-widest py-4 rounded-xl shadow-lg transition-all hover:scale-[1.01] active:scale-[0.99] text-xs cursor-pointer"
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveReservationTab("book");
+                        setIsReservationModalOpen(true);
+                      }}
+                      className="bg-gradient-to-b from-[#E0B258] to-[#C99638] hover:from-[#E8BD65] hover:to-[#D29E40] text-[#1E2516] font-black uppercase tracking-widest text-xs sm:text-sm px-10 py-4.5 rounded-full shadow-xl shadow-black/30 transition-all duration-300 hover:scale-105 active:scale-95 cursor-pointer border border-[#FAF8F3]/40 flex items-center gap-2"
                     >
-                      {editReservationId ? "Update Reservation" : "Confirm Booking"}
+                      <Calendar className="w-4 h-4" />
+                      <span>BOOK A TABLE NOW</span>
                     </button>
-                    {editReservationId && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditReservationId(null);
-                          setResDate("");
-                          setResTime("");
-                          setResTable("");
-                          setResGuests(2);
-                          setResName("");
-                          setResPhone("");
-                        }}
-                        className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-5 rounded-xl text-xs font-bold uppercase tracking-widest border border-slate-200 transition-all"
-                      >
-                        Cancel Edit
-                      </button>
-                    )}
                   </div>
-                </form>
 
-                {/* Display active reservations matching table / number */}
-                <div className="lg:col-span-5 space-y-6">
-                  <div className="bg-white text-slate-800 rounded-3xl p-6 sm:p-8 border border-slate-200/80 shadow-md shadow-slate-100/50">
-                    <h3 className="text-base font-bold uppercase tracking-wider text-amber-600 mb-2 flex items-center gap-2">
-                      <CheckCircle className="w-5 h-5 text-amber-600 shrink-0" />
-                      Manage Active Bookings
-                    </h3>
-                    <p className="text-xs text-slate-500 font-bold uppercase tracking-wider leading-relaxed">
-                      Below are confirmed reservations associated with your account. You can instantly modify times or cancel.
-                    </p>
-
-                    <div className="mt-6 space-y-4 max-h-[360px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
-                      {allReservations.filter((r) => r.status === "confirmed" && userReservationIds.includes(r.id)).length === 0 ? (
-                        <div className="text-center py-10 border border-slate-100 rounded-2xl bg-slate-50">
-                          <Users className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                          <span className="block text-xs text-slate-400 font-bold uppercase tracking-wider">No table bookings logged yet.</span>
-                        </div>
-                      ) : (
-                        allReservations
-                          .filter((r) => r.status === "confirmed" && userReservationIds.includes(r.id))
-                          .map((r) => (
-                            <div
-                              key={r.id}
-                              className="bg-slate-50 border border-slate-100 rounded-2xl p-4.5 space-y-3.5 shadow-sm hover:border-amber-600/40 transition-all"
-                            >
-                              <div className="flex justify-between items-start">
-                                <div>
-                                  <span className="text-[9px] text-amber-700 uppercase font-bold tracking-widest block">
-                                    Table {r.table}
-                                  </span>
-                                  <span className="text-sm font-bold uppercase block mt-0.5 text-slate-900">{r.name}</span>
-                                </div>
-                                <span className="text-[9px] uppercase bg-white text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md font-bold tracking-widest shadow-sm">
-                                  {r.guests} Guests
-                                </span>
-                              </div>
-
-                              <div className="text-xs text-slate-600 space-y-1 font-semibold uppercase tracking-wider bg-white p-2.5 rounded-xl border border-slate-100">
-                                <p className="flex items-center gap-1.5"><Calendar className="w-3.5 h-3.5 text-slate-400" /> {r.date}</p>
-                                <p className="flex items-center gap-1.5"><Clock className="w-3.5 h-3.5 text-slate-400" /> {r.time}</p>
-                                <p className="flex items-center gap-1.5"><Phone className="w-3.5 h-3.5 text-slate-400" /> {r.phone}</p>
-                              </div>
-
-                              <div className="flex gap-2 pt-1 border-t border-slate-100">
-                                <button
-                                  onClick={() => handleEditReservation(r)}
-                                  className="flex-1 bg-white hover:bg-slate-100 text-slate-700 hover:text-amber-700 text-[10px] font-bold uppercase tracking-widest py-2 rounded-lg transition-colors border border-slate-200 flex items-center justify-center gap-1 cursor-pointer shadow-sm"
-                                >
-                                  <Edit2 className="w-3.5 h-3.5" /> Edit
-                                </button>
-                                <button
-                                  onClick={() => handleCancelReservation(r.id)}
-                                  className="bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-600 text-[10px] font-bold uppercase tracking-widest py-2 px-4 rounded-lg transition-colors cursor-pointer"
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            </div>
-                          ))
-                      )}
+                  {/* Active reservation indicator if any exist */}
+                  {allReservations.filter((r) => r.status === "confirmed" && userReservationIds.includes(r.id)).length > 0 && (
+                    <div
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveReservationTab("manage");
+                        setIsReservationModalOpen(true);
+                      }}
+                      className="mt-6 inline-flex items-center gap-2 bg-[#FAF8F3]/20 hover:bg-[#FAF8F3]/30 backdrop-blur-sm border border-[#C9A84E]/50 px-4 py-2 rounded-full text-[11px] font-bold tracking-wider uppercase text-[#FAF8F3] transition-all cursor-pointer shadow-sm"
+                    >
+                      <span className="w-2 h-2 rounded-full bg-[#C9A84E] animate-ping" />
+                      <span>
+                        You have {allReservations.filter((r) => r.status === "confirmed" && userReservationIds.includes(r.id)).length} Active Booking(s)
+                      </span>
+                      <span className="underline ml-1 font-extrabold text-[#C9A84E]">View or Edit &rarr;</span>
                     </div>
-                  </div>
+                  )}
                 </div>
               </div>
             </div>
           </section>
 
+          {/* ================= RESERVATION POPUP MODAL ================= */}
+          <AnimatePresence>
+            {isReservationModalOpen && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-[#26301C]/80 backdrop-blur-md overflow-y-auto">
+                <div
+                  className="fixed inset-0 cursor-pointer"
+                  onClick={() => setIsReservationModalOpen(false)}
+                />
+
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.96, y: 20 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.96, y: 20 }}
+                  transition={{ duration: 0.25, ease: "easeOut" }}
+                  className="relative w-full max-w-3xl bg-[#FAF8F3] rounded-[2rem] shadow-2xl border border-[#C9A84E]/35 overflow-hidden z-10 my-6 max-h-[92vh] flex flex-col"
+                >
+                  {/* Modal Header */}
+                  <div className="p-5 sm:p-6 bg-white border-b border-[#C9A84E]/20 flex items-center justify-between shrink-0">
+                    <div className="flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-full bg-[#FAF8F3] border border-[#C9A84E]/40 flex items-center justify-center text-[#3E4B2F] shadow-sm">
+                        <Calendar className="w-5 h-5 text-[#C9A84E]" />
+                      </div>
+                      <div>
+                        <h3 className="text-xl sm:text-2xl font-serif font-black uppercase tracking-tight text-[#26301C]">
+                          {editReservationId ? "Modify Reservation" : "Table Reservation"}
+                        </h3>
+                        <p className="text-[10px] sm:text-xs text-[#52633E] uppercase font-bold tracking-widest mt-0.5">
+                          Delish Cafe &bull; Live Table Availability
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 sm:gap-3">
+                      <div className="flex bg-[#FAF8F3] p-1 rounded-xl border border-[#C9A84E]/30">
+                        <button
+                          type="button"
+                          onClick={() => setActiveReservationTab("book")}
+                          className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer ${
+                            activeReservationTab === "book"
+                              ? "bg-[#3E4B2F] text-white shadow-sm"
+                              : "text-[#52633E] hover:text-[#26301C]"
+                          }`}
+                        >
+                          Book Table
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setActiveReservationTab("manage")}
+                          className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center gap-1.5 cursor-pointer ${
+                            activeReservationTab === "manage"
+                              ? "bg-[#3E4B2F] text-white shadow-sm"
+                              : "text-[#52633E] hover:text-[#26301C]"
+                          }`}
+                        >
+                          <span>My Bookings</span>
+                          {allReservations.filter((r) => r.status === "confirmed" && userReservationIds.includes(r.id)).length > 0 && (
+                            <span className="w-4 h-4 rounded-full bg-[#C9A84E] text-[#26301C] text-[9px] font-black flex items-center justify-center">
+                              {allReservations.filter((r) => r.status === "confirmed" && userReservationIds.includes(r.id)).length}
+                            </span>
+                          )}
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setIsReservationModalOpen(false)}
+                        className="w-9 h-9 rounded-full bg-[#FAF8F3] hover:bg-[#F4EFE6] border border-[#C9A84E]/30 flex items-center justify-center text-[#52633E] hover:text-[#26301C] transition-colors cursor-pointer"
+                        title="Close"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Modal Body with scrollable content */}
+                  <div className="p-6 sm:p-8 overflow-y-auto space-y-6">
+                    {activeReservationTab === "book" ? (
+                      <form onSubmit={handleBookTable} className="space-y-6">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                          <div className="space-y-1.5">
+                            <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest">
+                              Select Date
+                            </label>
+                            <input
+                              type="date"
+                              min={new Date().toISOString().split("T")[0]}
+                              value={resDate}
+                              onChange={(e) => {
+                                setResDate(e.target.value);
+                                setResTable("");
+                              }}
+                              className="w-full px-4 py-3 border border-[#C9A84E]/30 rounded-xl bg-white text-[#26301C] focus:outline-none focus:border-[#3E4B2F] font-bold text-sm tracking-wider transition-all"
+                              required
+                            />
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest">
+                              Time Slot
+                            </label>
+                            <select
+                              value={resTime}
+                              onChange={(e) => {
+                                setResTime(e.target.value);
+                                setResTable("");
+                              }}
+                              className="w-full px-4 py-3 border border-[#C9A84E]/30 rounded-xl bg-white text-[#3E4B2F] focus:outline-none focus:border-[#3E4B2F] font-bold text-sm tracking-wider transition-all cursor-pointer"
+                              required
+                            >
+                              <option value="">Choose a slot</option>
+                              {TIME_SLOTS.map((slot) => (
+                                <option key={slot} value={slot}>
+                                  {slot}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Interactive Table Layout selector */}
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest">
+                              Select Available Table
+                            </label>
+                            {resTable && (
+                              <span className="text-[10px] text-[#3E4B2F] bg-white border border-[#C9A84E]/40 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                                Table {resTable} Selected
+                              </span>
+                            )}
+                          </div>
+                          {!resDate || !resTime ? (
+                            <div className="p-4 bg-white border border-[#C9A84E]/30 text-[#3E4B2F] text-xs rounded-xl flex items-center gap-2 font-bold uppercase tracking-wider">
+                              <AlertCircle className="w-4 h-4 shrink-0 text-[#C9A84E]" />
+                              <span>
+                                Select a <strong>Date</strong> and <strong>Time</strong> above to display live cafe table availability.
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="space-y-3 bg-white p-5 rounded-2xl border border-[#C9A84E]/25">
+                              <p className="text-[10px] uppercase text-[#52633E] font-bold tracking-widest">
+                                Click an available table below:
+                              </p>
+                              <div className="grid grid-cols-5 gap-3">
+                                {Array.from({ length: TOTAL_TABLES }, (_, index) => {
+                                  const tableNum = String(index + 1);
+                                  const isReserved = getUnavailableTables().includes(tableNum);
+                                  const isSelected = resTable === tableNum;
+
+                                  return (
+                                    <button
+                                      key={tableNum}
+                                      type="button"
+                                      disabled={isReserved}
+                                      onClick={() => setResTable(tableNum)}
+                                      className={`py-3.5 px-2 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                                        isReserved
+                                          ? "bg-[#FAF8F3] text-stone-300 border-stone-200 cursor-not-allowed line-through"
+                                          : isSelected
+                                          ? "bg-[#3E4B2F] text-white border-[#3E4B2F] shadow-md scale-105"
+                                          : "bg-[#FAF8F3] text-[#3E4B2F] border-[#C9A84E]/30 hover:border-[#3E4B2F] hover:bg-white"
+                                      }`}
+                                    >
+                                      T {tableNum}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Guest selector */}
+                        <div className="space-y-1.5">
+                          <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest">
+                            Number of Guests
+                          </label>
+                          <div className="flex items-center gap-4">
+                            <button
+                              type="button"
+                              onClick={() => setResGuests((prev) => Math.max(1, prev - 1))}
+                              className="w-10 h-10 rounded-xl bg-white border border-[#C9A84E]/30 hover:bg-[#F4EFE6] flex items-center justify-center text-[#3E4B2F] transition-all font-bold cursor-pointer"
+                            >
+                              <Minus className="w-4 h-4" />
+                            </button>
+                            <span className="font-serif font-bold text-lg text-[#26301C] w-8 text-center">
+                              {resGuests}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setResGuests((prev) => Math.min(12, prev + 1))}
+                              className="w-10 h-10 rounded-xl bg-white border border-[#C9A84E]/30 hover:bg-[#F4EFE6] flex items-center justify-center text-[#3E4B2F] transition-all font-bold cursor-pointer"
+                            >
+                              <Plus className="w-4 h-4" />
+                            </button>
+                            <span className="text-[10px] text-[#52633E] font-bold uppercase tracking-widest">
+                              Max 12 guests per single table
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                          <div className="space-y-1.5">
+                            <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest">
+                              Your Full Name
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="Sonika Patel"
+                              value={resName}
+                              onChange={(e) => setResName(e.target.value)}
+                              className="w-full px-4 py-3.5 border border-[#C9A84E]/30 rounded-xl focus:outline-none focus:border-[#3E4B2F] text-sm font-bold uppercase tracking-wider transition-all bg-white text-[#26301C] placeholder-stone-400"
+                              required
+                            />
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest">
+                              Contact Number
+                            </label>
+                            <input
+                              type="tel"
+                              placeholder="+91 98765 43210"
+                              value={resPhone}
+                              onChange={(e) => setResPhone(e.target.value)}
+                              className="w-full px-4 py-3.5 border border-[#C9A84E]/30 rounded-xl focus:outline-none focus:border-[#3E4B2F] text-sm font-bold uppercase tracking-wider transition-all bg-white text-[#26301C] placeholder-stone-400"
+                              required
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex gap-3 pt-2">
+                          <button
+                            type="submit"
+                            className="flex-1 bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest py-4 rounded-xl shadow-lg shadow-[#3E4B2F]/20 transition-all hover:scale-[1.01] active:scale-[0.99] text-xs cursor-pointer border border-[#C9A84E]/40"
+                          >
+                            {editReservationId ? "Update Reservation" : "Confirm Delish Reservation"}
+                          </button>
+                          {editReservationId && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditReservationId(null);
+                                setResDate("");
+                                setResTime("");
+                                setResTable("");
+                                setResGuests(2);
+                                setResName("");
+                                setResPhone("");
+                              }}
+                              className="bg-white hover:bg-[#F4EFE6] text-[#52633E] px-5 rounded-xl text-xs font-bold uppercase tracking-widest border border-[#C9A84E]/30 transition-all cursor-pointer"
+                            >
+                              Cancel Edit
+                            </button>
+                          )}
+                        </div>
+                      </form>
+                    ) : (
+                      /* Active Bookings view */
+                      <div className="space-y-4">
+                        <div className="flex items-center justify-between border-b border-[#C9A84E]/20 pb-3">
+                          <h4 className="text-sm font-serif font-bold uppercase tracking-wider text-[#3E4B2F] flex items-center gap-2">
+                            <CheckCircle className="w-4 h-4 text-[#C9A84E]" />
+                            Your Confirmed Bookings
+                          </h4>
+                          <button
+                            type="button"
+                            onClick={() => setActiveReservationTab("book")}
+                            className="text-[10px] font-bold uppercase tracking-wider text-[#C9A84E] hover:text-[#3E4B2F] underline cursor-pointer"
+                          >
+                            + Book Another Table
+                          </button>
+                        </div>
+
+                        {allReservations.filter((r) => r.status === "confirmed" && userReservationIds.includes(r.id)).length === 0 ? (
+                          <div className="text-center py-12 border border-[#C9A84E]/20 rounded-2xl bg-white">
+                            <Users className="w-10 h-10 text-stone-300 mx-auto mb-2" />
+                            <span className="block text-xs text-[#52633E] font-bold uppercase tracking-wider">
+                              No active table reservations found.
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setActiveReservationTab("book")}
+                              className="mt-4 inline-flex items-center gap-2 bg-[#3E4B2F] hover:bg-[#323E25] text-white px-5 py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer"
+                            >
+                              Book A Table Now
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="space-y-3.5 max-h-[50vh] overflow-y-auto pr-1">
+                            {allReservations
+                              .filter((r) => r.status === "confirmed" && userReservationIds.includes(r.id))
+                              .map((r) => (
+                                <div
+                                  key={r.id}
+                                  className="bg-white border border-[#C9A84E]/25 rounded-2xl p-5 space-y-3.5 shadow-sm hover:border-[#3E4B2F]/50 transition-all"
+                                >
+                                  <div className="flex justify-between items-start">
+                                    <div>
+                                      <span className="text-[10px] text-[#3E4B2F] uppercase font-bold tracking-widest block font-mono">
+                                        Table {r.table}
+                                      </span>
+                                      <span className="text-base font-serif font-bold uppercase block mt-0.5 text-[#26301C]">
+                                        {r.name}
+                                      </span>
+                                    </div>
+                                    <span className="text-[10px] uppercase bg-[#FAF8F3] text-[#3E4B2F] border border-[#C9A84E]/30 px-3 py-1 rounded-md font-bold tracking-widest shadow-sm">
+                                      {r.guests} Guests
+                                    </span>
+                                  </div>
+
+                                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs text-[#52633E] font-semibold uppercase tracking-wider bg-[#FAF8F3] p-3 rounded-xl border border-[#C9A84E]/20">
+                                    <p className="flex items-center gap-1.5">
+                                      <Calendar className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.date}
+                                    </p>
+                                    <p className="flex items-center gap-1.5">
+                                      <Clock className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.time}
+                                    </p>
+                                    <p className="flex items-center gap-1.5">
+                                      <Phone className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.phone}
+                                    </p>
+                                  </div>
+
+                                  <div className="flex gap-2 pt-1 border-t border-[#F4EFE6]">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleEditReservation(r)}
+                                      className="flex-1 bg-[#FAF8F3] hover:bg-[#F4EFE6] text-[#3E4B2F] text-[10px] font-bold uppercase tracking-widest py-2.5 rounded-lg transition-colors border border-[#C9A84E]/30 flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+                                    >
+                                      <Edit2 className="w-3.5 h-3.5" /> Modify Details
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleCancelReservation(r.id)}
+                                      className="bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-600 text-[10px] font-bold uppercase tracking-widest py-2.5 px-4 rounded-lg transition-colors cursor-pointer"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </motion.div>
+              </div>
+            )}
+          </AnimatePresence>
+
+          {/* ================= GALLERY SECTION ================= */}
+          <section ref={galleryRef} className="scroll-mt-24 py-24 bg-[#FAF8F3] border-t border-[#C9A84E]/20">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+              <div className="text-center max-w-2xl mx-auto mb-16">
+                <div className="inline-flex items-center gap-2 bg-white border border-[#C9A84E]/40 px-3.5 py-1.5 rounded-full text-[11px] font-bold tracking-widest uppercase text-[#3E4B2F] mb-4 shadow-sm">
+                  <Coffee className="w-3.5 h-3.5 text-[#C9A84E]" />
+                  The Delish Atmosphere
+                </div>
+                <h2 className="text-4xl sm:text-6xl font-serif font-black tracking-tight uppercase leading-tight text-[#26301C]">
+                  Moments At <br /><span className="text-[#C9A84E] font-serif italic">Delish Cafe</span>
+                </h2>
+                <p className="text-xs uppercase tracking-widest text-[#52633E] mt-3 leading-relaxed font-bold">
+                  Take a visual tour through our sunlit cafe spaces, barista brewing bar, outdoor terrace, and artisan plates.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                {[
+                  {
+                    title: "Specialty Espresso Bar",
+                    desc: "Artisanal arabica beans ground to perfection",
+                    img: "https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=800&auto=format&fit=crop&q=80",
+                    tag: "Barista Bar"
+                  },
+                  {
+                    title: "Sunlit Cozy Booths",
+                    desc: "Warm wooden acoustics & comfortable seating",
+                    img: "https://images.unsplash.com/photo-1554118811-1e0d58224f24?w=800&auto=format&fit=crop&q=80",
+                    tag: "Ambiance"
+                  },
+                  {
+                    title: "Woodfired Artisan Crusts",
+                    desc: "Fermented sourdough stretched and baked fresh",
+                    img: "https://images.unsplash.com/photo-1513104890138-7c749659a591?w=800&auto=format&fit=crop&q=80",
+                    tag: "Kitchen"
+                  },
+                  {
+                    title: "Creamy Dessert Counter",
+                    desc: "Pastries, cheesecakes, and warm fudge brownies",
+                    img: "https://images.unsplash.com/photo-1509440159596-0249088772ff?w=800&auto=format&fit=crop&q=80",
+                    tag: "Bakery"
+                  },
+                  {
+                    title: "Outdoor Greenery Patio",
+                    desc: "Open-air sunset breezes with friends & family",
+                    img: "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=800&auto=format&fit=crop&q=80",
+                    tag: "Outdoor"
+                  },
+                  {
+                    title: "Refreshing Shake Station",
+                    desc: "Lotus Biscoff, Belgian chocolate, and fruity blends",
+                    img: "https://images.unsplash.com/photo-1572490122747-3968b75cc699?w=800&auto=format&fit=crop&q=80",
+                    tag: "Beverages"
+                  }
+                ].map((item, idx) => (
+                  <div
+                    key={idx}
+                    className="group relative rounded-3xl overflow-hidden border border-[#C9A84E]/25 shadow-md shadow-[#3E4B2F]/5 aspect-[4/3] bg-stone-900 cursor-pointer"
+                  >
+                    <img
+                      src={item.img}
+                      alt={item.title}
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700 opacity-90 group-hover:opacity-100"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent transition-opacity duration-300" />
+                    <div className="absolute top-4 left-4">
+                      <span className="text-[9px] uppercase font-bold tracking-widest px-2.5 py-1 rounded-md bg-[#FAF8F3]/90 text-[#3E4B2F] border border-[#C9A84E]/40 backdrop-blur-sm shadow-sm">
+                        {item.tag}
+                      </span>
+                    </div>
+                    <div className="absolute bottom-5 left-5 right-5 text-white space-y-1">
+                      <h4 className="font-serif font-bold text-lg uppercase tracking-wide group-hover:text-[#C9A84E] transition-colors">
+                        {item.title}
+                      </h4>
+                      <p className="text-xs text-stone-300 font-medium">
+                        {item.desc}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
           {/* ================= ABOUT SECTION ================= */}
-          <section ref={aboutRef} className="scroll-mt-24 py-24 bg-[#FAF9F6] border-t border-slate-200/60">
+          <section ref={aboutRef} className="scroll-mt-24 py-24 bg-white border-t border-[#C9A84E]/20">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-16 items-center">
-                <div className="relative aspect-video sm:aspect-[4/3] rounded-3xl overflow-hidden shadow-md shadow-slate-100/50 border border-slate-200/80">
+                <div className="relative aspect-video sm:aspect-[4/3] rounded-3xl overflow-hidden shadow-xl shadow-[#3E4B2F]/10 border border-[#C9A84E]/30">
                   <img
-                    src="https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=800&auto=format&fit=crop&q=80"
-                    alt="SmartMenu Dining Hall"
-                    className="w-full h-full object-cover opacity-90"
+                    src="https://images.unsplash.com/photo-1554118811-1e0d58224f24?w=800&auto=format&fit=crop&q=80"
+                    alt="Delish Cafe Dining Hall"
+                    className="w-full h-full object-cover"
                   />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
+                  <div className="absolute inset-0 bg-gradient-to-t from-[#26301C]/80 via-transparent to-transparent" />
                   <div className="absolute bottom-6 left-6 text-white space-y-1">
-                    <span className="text-[9px] text-amber-400 uppercase font-bold tracking-widest block">Main Hall Lounge</span>
-                    <h5 className="font-bold uppercase tracking-tight text-lg">Ambient & Spacious Seating</h5>
+                    <span className="text-[9px] text-[#C9A84E] uppercase font-bold tracking-widest block">Main Dining Lounge</span>
+                    <h5 className="font-serif font-bold uppercase tracking-tight text-xl">Warm, Aesthetic & Spacious Seating</h5>
                   </div>
                 </div>
 
                 <div className="space-y-6">
-                  <div className="text-[10px] font-bold text-amber-700 uppercase tracking-widest bg-amber-50 border border-amber-200 px-3.5 py-1.5 rounded-full inline-block">Our Story</div>
-                  <h3 className="text-4xl sm:text-5xl font-extrabold tracking-tight uppercase leading-tight text-slate-900">Elevating Ahmedabad's Culinary Excellence</h3>
-                  <p className="text-xs text-slate-600 uppercase tracking-wider font-semibold leading-relaxed">
-                    SmartMenu Restaurant is at the vanguard of digital dining innovations. By pairing traditional recipes crafted by culinary veterans with frictionless QR technology, we create culinary experiences that are fast, accessible, and extraordinarily flavorful.
+                  <div className="text-[10px] font-bold text-[#3E4B2F] uppercase tracking-widest bg-[#FAF8F3] border border-[#C9A84E]/40 px-3.5 py-1.5 rounded-full inline-block">
+                    The Delish Cafe Story
+                  </div>
+                  <h3 className="text-4xl sm:text-5xl font-serif font-bold tracking-tight uppercase leading-tight text-[#26301C]">
+                    Ahmedabad's Pure Veg <br /><span className="text-[#C9A84E] italic font-serif">Artisan Cafe</span>
+                  </h3>
+                  <p className="text-xs text-[#52633E] uppercase tracking-wider font-semibold leading-relaxed">
+                    Delish Cafe was founded on a simple passion: to bring world-class specialty coffees, authentic Italian stone-baked sourdough pizzas, hand-rolled pasta, and artisanal shakes to food lovers in Ahmedabad in a 100% pure vegetarian culinary haven.
                   </p>
-                  <p className="text-xs text-slate-500 uppercase tracking-wider font-semibold leading-relaxed">
-                    Enjoy real-time order logs, customizable pizza toppings, transparent pricing, and instant seating bookings on the go.
+                  <p className="text-xs text-[#52633E] uppercase tracking-wider font-semibold leading-relaxed">
+                    With our contactless SmartMenu digital ordering engine, you can browse high-resolution dishes, personalize order notes, and watch your food cook live right from your table.
                   </p>
                   <div className="grid grid-cols-2 gap-5 pt-4">
-                    <div className="p-4 bg-white border border-slate-200/80 rounded-2xl shadow-sm">
-                      <span className="block text-3xl font-bold italic text-amber-600">20+</span>
-                      <span className="text-[9px] text-slate-500 font-bold uppercase mt-1 block tracking-widest">Tables Equipped</span>
+                    <div className="p-5 bg-[#FAF8F3] border border-[#C9A84E]/25 rounded-2xl shadow-sm">
+                      <span className="block text-3xl font-serif font-black italic text-[#3E4B2F]">100%</span>
+                      <span className="text-[9px] text-[#52633E] font-bold uppercase mt-1 block tracking-widest">Pure Vegetarian</span>
                     </div>
-                    <div className="p-4 bg-white border border-slate-200/80 rounded-2xl shadow-sm">
-                      <span className="block text-3xl font-bold italic text-amber-600">10k+</span>
-                      <span className="text-[9px] text-slate-500 font-bold uppercase mt-1 block tracking-widest">Happy Foodies</span>
+                    <div className="p-5 bg-[#FAF8F3] border border-[#C9A84E]/25 rounded-2xl shadow-sm">
+                      <span className="block text-3xl font-serif font-black italic text-[#C9A84E]">25k+</span>
+                      <span className="text-[9px] text-[#52633E] font-bold uppercase mt-1 block tracking-widest">Delighted Guests</span>
                     </div>
                   </div>
                 </div>
@@ -1651,53 +1997,57 @@ export default function App() {
           </section>
 
           {/* ================= REVIEWS SECTION ================= */}
-          <section ref={reviewsRef} className="scroll-mt-24 py-24 bg-white border-t border-slate-200/60 shadow-sm">
+          <section ref={reviewsRef} className="scroll-mt-24 py-24 bg-[#FAF8F3] border-t border-[#C9A84E]/20 shadow-sm">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
               <div className="text-center max-w-xl mx-auto mb-16">
-                <h2 className="text-4xl sm:text-6xl font-extrabold tracking-tight uppercase leading-tight text-slate-900">
-                  Loved <br /><span className="text-amber-600">by Thousands</span>
+                <div className="inline-flex items-center gap-2 bg-white border border-[#C9A84E]/40 px-3.5 py-1.5 rounded-full text-[11px] font-bold tracking-widest uppercase text-[#3E4B2F] mb-4 shadow-sm">
+                  <Star className="w-3.5 h-3.5 text-[#C9A84E] fill-[#C9A84E]" />
+                  Guest Feedback
+                </div>
+                <h2 className="text-4xl sm:text-6xl font-serif font-black tracking-tight uppercase leading-tight text-[#26301C]">
+                  Loved By <br /><span className="text-[#C9A84E] font-serif italic">Ahmedabad</span>
                 </h2>
-                <p className="text-xs uppercase tracking-widest text-slate-500 mt-3 leading-relaxed font-bold">
-                  Read honest feedback shared by our loyal community members.
+                <p className="text-xs uppercase tracking-widest text-[#52633E] mt-3 leading-relaxed font-bold">
+                  Honest reviews from coffee connoisseurs and foodies across the city.
                 </p>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                <div className="bg-slate-50 border border-slate-200/60 p-8 rounded-3xl shadow-sm flex flex-col justify-between hover:border-amber-600/40 hover:bg-white hover:shadow-lg transition-all duration-300">
-                  <p className="text-xs text-slate-600 leading-relaxed font-semibold uppercase tracking-wider">
-                    "The QR ordering is so smart! We scanned the table tag, custom added toppings to our farmhouse pizza, placed order, and it was served piping hot in 12 minutes flat. 10/10!"
+                <div className="bg-white border border-[#C9A84E]/25 p-8 rounded-3xl shadow-md shadow-[#3E4B2F]/5 flex flex-col justify-between hover:border-[#3E4B2F]/50 hover:shadow-xl transition-all duration-300">
+                  <p className="text-xs text-[#52633E] leading-relaxed font-semibold uppercase tracking-wider">
+                    "Delish Cafe's table QR ordering is unbelievably slick! We scanned the table code, added the Farmhouse Pizza and Lotus Biscoff Shake, and our order arrived piping hot in 12 minutes. Best coffee in town!"
                   </p>
-                  <div className="flex items-center gap-3.5 pt-6 mt-6 border-t border-slate-200/60">
-                    <div className="w-10 h-10 rounded-full bg-white border border-slate-200 flex items-center justify-center font-bold text-slate-700 text-xs">R</div>
+                  <div className="flex items-center gap-3.5 pt-6 mt-6 border-t border-[#F4EFE6]">
+                    <div className="w-10 h-10 rounded-full bg-[#FAF8F3] border border-[#C9A84E]/30 flex items-center justify-center font-bold text-[#3E4B2F] text-xs">R</div>
                     <div>
-                      <h5 className="font-bold uppercase tracking-wider text-xs text-slate-900">Rahul Sharma</h5>
-                      <span className="text-[10px] text-amber-500 font-bold tracking-widest">★★★★★</span>
+                      <h5 className="font-serif font-bold uppercase tracking-wider text-xs text-[#26301C]">Rahul Sharma</h5>
+                      <span className="text-[10px] text-[#C9A84E] font-bold tracking-widest">★★★★★</span>
                     </div>
                   </div>
                 </div>
 
-                <div className="bg-slate-50 border border-slate-200/60 p-8 rounded-3xl shadow-sm flex flex-col justify-between hover:border-amber-600/40 hover:bg-white hover:shadow-lg transition-all duration-300">
-                  <p className="text-xs text-slate-600 leading-relaxed font-semibold uppercase tracking-wider">
-                    "Beautifully clean interface! Booking a table in advance is remarkably streamlined. Love the live table indicator showing what’s available. Burgers are incredible!"
+                <div className="bg-white border border-[#C9A84E]/25 p-8 rounded-3xl shadow-md shadow-[#3E4B2F]/5 flex flex-col justify-between hover:border-[#3E4B2F]/50 hover:shadow-xl transition-all duration-300">
+                  <p className="text-xs text-[#52633E] leading-relaxed font-semibold uppercase tracking-wider">
+                    "Such a cozy vibe and the fact that it's 100% Pure Vegetarian makes it our go-to family spot. Booking a table in advance was seamless with zero waiting on Sunday night. 10/10!"
                   </p>
-                  <div className="flex items-center gap-3.5 pt-6 mt-6 border-t border-slate-200/60">
-                    <div className="w-10 h-10 rounded-full bg-white border border-slate-200 flex items-center justify-center font-bold text-slate-700 text-xs">P</div>
+                  <div className="flex items-center gap-3.5 pt-6 mt-6 border-t border-[#F4EFE6]">
+                    <div className="w-10 h-10 rounded-full bg-[#FAF8F3] border border-[#C9A84E]/30 flex items-center justify-center font-bold text-[#3E4B2F] text-xs">P</div>
                     <div>
-                      <h5 className="font-bold uppercase tracking-wider text-xs text-slate-900">Priya Patel</h5>
-                      <span className="text-[10px] text-amber-500 font-bold tracking-widest">★★★★★</span>
+                      <h5 className="font-serif font-bold uppercase tracking-wider text-xs text-[#26301C]">Priya Patel</h5>
+                      <span className="text-[10px] text-[#C9A84E] font-bold tracking-widest">★★★★★</span>
                     </div>
                   </div>
                 </div>
 
-                <div className="bg-slate-50 border border-slate-200/60 p-8 rounded-3xl shadow-sm flex flex-col justify-between hover:border-amber-600/40 hover:bg-white hover:shadow-lg transition-all duration-300">
-                  <p className="text-xs text-slate-600 leading-relaxed font-semibold uppercase tracking-wider">
-                    "Fabulous chocolate brownie and combos! We ordered a Family combo which is amazing value for money. Fresh ingredients, express delivery, supreme service."
+                <div className="bg-white border border-[#C9A84E]/25 p-8 rounded-3xl shadow-md shadow-[#3E4B2F]/5 flex flex-col justify-between hover:border-[#3E4B2F]/50 hover:shadow-xl transition-all duration-300">
+                  <p className="text-xs text-[#52633E] leading-relaxed font-semibold uppercase tracking-wider">
+                    "The Spanish Iced Latte and Truffle Mushroom Pizza are outstanding. The live kitchen tracker letting you know when your food is being prepared is genius!"
                   </p>
-                  <div className="flex items-center gap-3.5 pt-6 mt-6 border-t border-slate-200/60">
-                    <div className="w-10 h-10 rounded-full bg-white border border-slate-200 flex items-center justify-center font-bold text-slate-700 text-xs">A</div>
+                  <div className="flex items-center gap-3.5 pt-6 mt-6 border-t border-[#F4EFE6]">
+                    <div className="w-10 h-10 rounded-full bg-[#FAF8F3] border border-[#C9A84E]/30 flex items-center justify-center font-bold text-[#3E4B2F] text-xs">A</div>
                     <div>
-                      <h5 className="font-bold uppercase tracking-wider text-xs text-slate-900">Aman Shah</h5>
-                      <span className="text-[10px] text-amber-500 font-bold tracking-widest">★★★★★</span>
+                      <h5 className="font-serif font-bold uppercase tracking-wider text-xs text-[#26301C]">Aman Shah</h5>
+                      <span className="text-[10px] text-[#C9A84E] font-bold tracking-widest">★★★★★</span>
                     </div>
                   </div>
                 </div>
@@ -1706,48 +2056,58 @@ export default function App() {
           </section>
 
           {/* ================= CONTACT SECTION ================= */}
-          <section ref={contactRef} className="scroll-mt-24 py-24 bg-[#FAF9F6] border-t border-slate-200/60">
+          <section ref={contactRef} className="scroll-mt-24 py-24 bg-white border-t border-[#C9A84E]/20">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-              <div className="bg-white text-slate-800 rounded-3xl p-8 sm:p-12 border border-slate-200/80 shadow-md shadow-slate-100/50 relative overflow-hidden">
-                <div className="absolute -top-12 -right-12 w-64 h-64 bg-amber-500/5 rounded-full blur-3xl" />
-                <div className="absolute -bottom-12 -left-12 w-64 h-64 bg-slate-500/5 rounded-full blur-3xl" />
+              <div className="bg-white text-[#26301C] rounded-3xl p-8 sm:p-12 border border-[#C9A84E]/30 shadow-xl shadow-[#3E4B2F]/5 relative overflow-hidden">
+                <div className="absolute -top-12 -right-12 w-64 h-64 bg-[#C9A84E]/10 rounded-full blur-3xl" />
+                <div className="absolute -bottom-12 -left-12 w-64 h-64 bg-[#3E4B2F]/10 rounded-full blur-3xl" />
 
                 <div className="relative z-10 grid grid-cols-1 md:grid-cols-12 gap-12 items-center">
                   <div className="md:col-span-7 space-y-6">
-                    <span className="text-[10px] font-bold text-amber-700 uppercase tracking-widest bg-amber-50 border border-amber-200 px-3.5 py-1.5 rounded-full inline-block">Support & Location</span>
-                    <h3 className="text-4xl font-extrabold uppercase tracking-tight text-slate-900">We'd Love to Hear From You</h3>
-                    <p className="text-xs text-slate-500 uppercase tracking-wider font-semibold leading-relaxed">
-                      Questions regarding franchise, group bookings, table setups, or payment troubleshooting? Reach our support desk or step right in.
+                    <span className="text-[10px] font-bold text-[#3E4B2F] uppercase tracking-widest bg-[#FAF8F3] border border-[#C9A84E]/40 px-3.5 py-1.5 rounded-full inline-block">
+                      Delish Cafe Location & Hours
+                    </span>
+                    <h3 className="text-4xl font-serif font-bold uppercase tracking-tight text-[#26301C]">
+                      Drop By Or Connect With Us
+                    </h3>
+                    <p className="text-xs text-[#52633E] uppercase tracking-wider font-semibold leading-relaxed">
+                      Planning a private party, corporate coffee meetup, or have questions regarding our menu? Our team is always ready to assist.
                     </p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pt-2 text-xs uppercase tracking-widest font-bold text-slate-700">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pt-2 text-xs uppercase tracking-widest font-bold text-[#3E4B2F]">
                       <div className="flex items-center gap-3">
-                        <MapPin className="w-5 h-5 text-amber-600 shrink-0" />
-                        <span>Ahmedabad, Gujarat</span>
+                        <MapPin className="w-5 h-5 text-[#C9A84E] shrink-0" />
+                        <span>Sindhu Bhavan Marg, Bodakdev, Ahmedabad, Gujarat</span>
                       </div>
                       <div className="flex items-center gap-3">
-                        <Phone className="w-5 h-5 text-amber-600 shrink-0" />
-                        <span>+91 9999999999</span>
+                        <Phone className="w-5 h-5 text-[#C9A84E] shrink-0" />
+                        <span>+91 98765 43210</span>
                       </div>
                       <div className="flex items-center gap-3">
-                        <Mail className="w-5 h-5 text-amber-600 shrink-0" />
-                        <span>info@smartmenu.com</span>
+                        <Mail className="w-5 h-5 text-[#C9A84E] shrink-0" />
+                        <span>contact@delishcafe.in</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <Clock className="w-5 h-5 text-[#C9A84E] shrink-0" />
+                        <span>8:00 AM – 11:30 PM (Everyday)</span>
                       </div>
                     </div>
                   </div>
 
-                  <div className="md:col-span-5 bg-slate-50 p-6 rounded-2xl border border-slate-200/80 space-y-4">
-                    <h5 className="font-bold uppercase tracking-widest text-[10px] text-amber-700">Quick Feedback</h5>
-                    <p className="text-[10px] text-slate-500 leading-relaxed font-bold uppercase tracking-wider">Submit your email address to receive daily discount coupon keys!</p>
+                  <div className="md:col-span-5 bg-[#FAF8F3] p-6 rounded-2xl border border-[#C9A84E]/30 space-y-4">
+                    <h5 className="font-serif font-bold uppercase tracking-widest text-xs text-[#3E4B2F]">Delish Cafe Club</h5>
+                    <p className="text-[10px] text-[#52633E] leading-relaxed font-bold uppercase tracking-wider">
+                      Subscribe to receive weekly member perks, complimentary brew passes, and chef's special invites!
+                    </p>
                     <input
                       type="email"
                       placeholder="Enter your email"
-                      className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl focus:outline-none focus:border-amber-600 text-xs text-slate-800 font-bold uppercase tracking-wider"
+                      className="w-full px-4 py-3 bg-white border border-[#C9A84E]/30 rounded-xl focus:outline-none focus:border-[#3E4B2F] text-xs text-[#26301C] font-bold uppercase tracking-wider"
                     />
                     <button
-                      onClick={() => showToast("Subscribed successfully!")}
-                      className="w-full bg-slate-950 hover:bg-slate-900 text-white font-bold uppercase tracking-widest py-3 rounded-xl text-[10px] transition-all cursor-pointer shadow-sm"
+                      onClick={() => showToast("Subscribed to Delish Club perks successfully!")}
+                      className="w-full bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest py-3 rounded-xl text-[10px] transition-all cursor-pointer shadow-sm border border-[#C9A84E]/30"
                     >
-                      Subscribe Now
+                      Join Delish Club
                     </button>
                   </div>
                 </div>
@@ -1757,34 +2117,34 @@ export default function App() {
         </>
       ) : (
         // ================= OWNER DASHBOARD =================
-        <section className="py-12 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-12 bg-[#FAF9F6]">
+        <section className="py-12 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-12 bg-[#FAF8F3]">
           {/* Dashboard Header Stats */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            <div className="bg-white border border-slate-200/80 p-6 rounded-2xl shadow-md shadow-slate-100/50">
-              <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider block">Active Kitchen Orders</span>
+            <div className="bg-white border border-[#C9A84E]/25 p-6 rounded-2xl shadow-md shadow-[#3E4B2F]/5">
+              <span className="text-[10px] text-[#52633E] uppercase font-bold tracking-widest block">Active Kitchen Orders</span>
               <div className="flex items-baseline gap-2 mt-2">
-                <span className="text-4xl font-extrabold italic text-slate-900">{pendingOrdersCount}</span>
-                <span className="text-[10px] text-amber-700 uppercase font-bold tracking-wider">In queue</span>
+                <span className="text-4xl font-serif font-black italic text-[#26301C]">{pendingOrdersCount}</span>
+                <span className="text-[10px] text-[#C9A84E] uppercase font-bold tracking-wider">In kitchen queue</span>
               </div>
             </div>
-            <div className="bg-white border border-slate-200/80 p-6 rounded-2xl shadow-md shadow-slate-100/50">
-              <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider block">Confirmed Tables Booked</span>
+            <div className="bg-white border border-[#C9A84E]/25 p-6 rounded-2xl shadow-md shadow-[#3E4B2F]/5">
+              <span className="text-[10px] text-[#52633E] uppercase font-bold tracking-widest block">Confirmed Tables Booked</span>
               <div className="flex items-baseline gap-2 mt-2">
-                <span className="text-4xl font-extrabold italic text-slate-900">{activeReservationsCount}</span>
-                <span className="text-[10px] text-amber-700 uppercase font-bold tracking-wider">Slots locked</span>
+                <span className="text-4xl font-serif font-black italic text-[#26301C]">{activeReservationsCount}</span>
+                <span className="text-[10px] text-[#3E4B2F] uppercase font-bold tracking-wider">Slots booked</span>
               </div>
             </div>
-            <div className="bg-white border border-slate-200/80 p-6 rounded-2xl shadow-md shadow-slate-100/50">
-              <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider block">Table Seating Limits</span>
+            <div className="bg-white border border-[#C9A84E]/25 p-6 rounded-2xl shadow-md shadow-[#3E4B2F]/5">
+              <span className="text-[10px] text-[#52633E] uppercase font-bold tracking-widest block">Table Capacity Limit</span>
               <div className="flex items-baseline gap-2 mt-2">
-                <span className="text-4xl font-extrabold italic text-slate-900">{TOTAL_TABLES}</span>
-                <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">Max Tables</span>
+                <span className="text-4xl font-serif font-black italic text-[#26301C]">{TOTAL_TABLES}</span>
+                <span className="text-[10px] text-[#52633E] uppercase font-bold tracking-wider">Cafe Tables</span>
               </div>
             </div>
-            <div className="bg-white border border-slate-200/80 p-6 rounded-2xl shadow-md shadow-slate-100/50">
-              <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider block">Active Revenue Flow</span>
+            <div className="bg-white border border-[#C9A84E]/25 p-6 rounded-2xl shadow-md shadow-[#3E4B2F]/5">
+              <span className="text-[10px] text-[#52633E] uppercase font-bold tracking-widest block">Gross Cafe Revenue</span>
               <div className="flex items-baseline gap-2 mt-2">
-                <span className="text-4xl font-extrabold italic text-emerald-600">
+                <span className="text-4xl font-serif font-black italic text-[#3E4B2F]">
                   ₹{allOrders.filter((o) => o.status === "Completed").reduce((s, o) => s + o.total, 0)}
                 </span>
                 <span className="text-[9px] uppercase bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold px-1.5 py-0.5 rounded-md tracking-widest">Realized</span>
@@ -1794,28 +2154,28 @@ export default function App() {
 
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
             {/* Live orders log (Col-span 8) */}
-            <div className="lg:col-span-8 bg-white border border-slate-200/80 rounded-3xl p-6 sm:p-8 shadow-md shadow-slate-100/50 space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+            <div className="lg:col-span-8 bg-white border border-[#C9A84E]/25 rounded-3xl p-6 sm:p-8 shadow-md shadow-[#3E4B2F]/5 space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#F4EFE6] pb-5">
                 <div>
-                  <h3 className="text-xl font-bold uppercase tracking-wider text-slate-900 flex items-center gap-2">
-                    <TrendingUp className="w-5 h-5 text-amber-600" />
-                    Kitchen Cooking Pipeline
+                  <h3 className="text-xl font-serif font-bold uppercase tracking-wider text-[#26301C] flex items-center gap-2">
+                    <TrendingUp className="w-5 h-5 text-[#C9A84E]" />
+                    Delish Kitchen Pipeline
                   </h3>
-                  <p className="text-xs text-slate-500 uppercase tracking-wider mt-1">Live customer orders mapped. Update statuses as chef completes dishes.</p>
+                  <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">Live cafe customer orders mapped in real time. Advance dish stages as chefs prepare.</p>
                 </div>
                 <button
                   onClick={fetchOrdersAndReservations}
-                  className="bg-slate-950 hover:bg-slate-850 text-white font-bold uppercase tracking-widest text-xs px-4.5 py-2.5 rounded-xl transition-all self-start sm:self-auto cursor-pointer shadow-sm"
+                  className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-xs px-4.5 py-2.5 rounded-xl transition-all self-start sm:self-auto cursor-pointer shadow-sm border border-[#C9A84E]/30"
                 >
-                  Reload Live Queue
+                  Sync Live Queue
                 </button>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 {allOrders.length === 0 ? (
-                  <div className="sm:col-span-2 text-center py-16 border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50">
-                    <Utensils className="w-10 h-10 text-slate-300 mx-auto mb-2" />
-                    <span className="block text-slate-400 uppercase font-bold tracking-widest text-xs">No active customer orders currently logged.</span>
+                  <div className="sm:col-span-2 text-center py-16 border-2 border-dashed border-[#C9A84E]/30 rounded-2xl bg-[#FAF8F3]">
+                    <Utensils className="w-10 h-10 text-stone-300 mx-auto mb-2" />
+                    <span className="block text-[#52633E] uppercase font-bold tracking-widest text-xs">No active cafe orders logged yet.</span>
                   </div>
                 ) : (
                   allOrders.map((order) => {
@@ -1825,8 +2185,8 @@ export default function App() {
                         key={order.id}
                         className={`border rounded-2xl p-5 flex flex-col justify-between shadow-sm transition-all duration-300 ${
                           isCompleted
-                            ? "bg-slate-50/50 border-slate-100 opacity-60"
-                            : "bg-slate-50 border-slate-200 hover:border-amber-600"
+                            ? "bg-[#FAF8F3]/50 border-stone-200 opacity-60"
+                            : "bg-[#FAF8F3] border-[#C9A84E]/30 hover:border-[#3E4B2F]"
                         }`}
                       >
                         <div className="space-y-4">
@@ -1834,13 +2194,13 @@ export default function App() {
                             <div>
                               <span className={`inline-block px-2.5 py-1 rounded-md text-[9px] font-bold tracking-widest uppercase mb-1.5 ${
                                 order.orderType === "delivery"
-                                  ? "bg-indigo-50 text-indigo-700 border border-indigo-200"
-                                  : "bg-amber-50 text-amber-700 border border-amber-200"
+                                  ? "bg-amber-50 text-amber-800 border border-amber-200"
+                                  : "bg-white text-[#3E4B2F] border border-[#C9A84E]/40"
                               }`}>
                                 {order.orderType === "delivery" ? "🚀 Delivery" : `🪑 Table ${order.tableNumber}`}
                               </span>
-                              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-800 font-mono">{order.id}</h4>
-                              <span className="block text-[9px] text-slate-400 uppercase tracking-widest mt-0.5">{order.createdAt}</span>
+                              <h4 className="text-xs font-bold uppercase tracking-wider text-[#26301C] font-mono">{order.id}</h4>
+                              <span className="block text-[9px] text-[#52633E] uppercase tracking-widest mt-0.5">{order.createdAt}</span>
                             </div>
                             <span className={`px-2.5 py-1 rounded-md text-[9px] font-bold uppercase tracking-widest ${
                               order.status === "Completed"
@@ -1849,46 +2209,46 @@ export default function App() {
                                 ? "bg-teal-50 text-teal-700 border border-teal-200 animate-pulse"
                                 : order.status === "Preparing"
                                 ? "bg-amber-50 text-amber-700 border border-amber-200"
-                                : "bg-slate-100 text-slate-700 border border-slate-200"
+                                : "bg-white text-stone-700 border border-stone-200"
                             }`}>
                               {order.status}
                             </span>
                           </div>
 
                           {/* Order items list */}
-                          <div className="bg-white p-3 rounded-xl border border-slate-100 text-xs text-slate-700 space-y-1.5">
+                          <div className="bg-white p-3 rounded-xl border border-[#C9A84E]/20 text-xs text-stone-700 space-y-1.5">
                             {order.items.map((it, idx) => (
                               <p key={idx} className="flex justify-between font-bold uppercase tracking-wider text-[10px]">
-                                <span className="text-slate-800">
-                                  {it.name} <span className="text-[9px] text-slate-400 font-bold">×{it.quantity}</span>
+                                <span className="text-[#26301C]">
+                                  {it.name} <span className="text-[9px] text-[#52633E] font-bold">×{it.quantity}</span>
                                 </span>
-                                <span className="text-slate-900">₹{it.price * it.quantity}</span>
+                                <span className="text-[#26301C] font-mono">₹{it.price * it.quantity}</span>
                               </p>
                             ))}
                             {order.orderType === "delivery" && order.deliveryAddress && (
-                              <div className="pt-2 border-t border-slate-100 mt-2">
-                                <span className="text-[9px] uppercase text-indigo-700 font-bold tracking-widest block">Delivery Address:</span>
-                                <p className="text-[10px] text-slate-600 font-semibold uppercase tracking-wider leading-normal mt-0.5">{order.deliveryAddress}</p>
+                              <div className="pt-2 border-t border-stone-100 mt-2">
+                                <span className="text-[9px] uppercase text-amber-800 font-bold tracking-widest block">Delivery Address:</span>
+                                <p className="text-[10px] text-[#52633E] font-semibold uppercase tracking-wider leading-normal mt-0.5">{order.deliveryAddress}</p>
                               </div>
                             )}
                           </div>
                         </div>
 
-                        <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-5">
-                          <span className="text-lg font-bold text-slate-950">Total: ₹{order.total}</span>
+                        <div className="pt-4 border-t border-[#C9A84E]/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-5">
+                          <span className="text-lg font-serif font-bold text-[#26301C]">Total: ₹{order.total}</span>
                           <div className="flex items-center gap-2">
                             <button
                               onClick={() => setSelectedBillOrder(order)}
-                              className="bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 font-bold uppercase tracking-widest text-[9px] px-3 py-2 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer flex items-center gap-1 shadow-sm"
+                              className="bg-white hover:bg-[#FAF8F3] text-[#3E4B2F] border border-[#C9A84E]/30 font-bold uppercase tracking-widest text-[9px] px-3 py-2 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer flex items-center gap-1 shadow-sm"
                               title="Generate Invoice & Print"
                             >
-                              <Receipt className="w-3.5 h-3.5 text-amber-800" />
+                              <Receipt className="w-3.5 h-3.5 text-[#C9A84E]" />
                               Bill
                             </button>
                             {!isCompleted ? (
                               <button
                                 onClick={() => advanceOrderStatus(order.id, order.status)}
-                                className="bg-slate-950 hover:bg-slate-800 text-white font-bold uppercase tracking-widest text-[9px] px-3.5 py-2 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer shadow-sm"
+                                className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-[9px] px-3.5 py-2 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer shadow-sm border border-[#C9A84E]/30"
                               >
                                 {order.status === "Ready" ? "Mark Complete" : "Advance Status"}
                               </button>
@@ -1908,20 +2268,20 @@ export default function App() {
             </div>
 
             {/* Live Reservations Log (Col-span 4) */}
-            <div className="lg:col-span-4 bg-white text-slate-800 rounded-3xl p-6 shadow-md shadow-slate-100/50 border border-slate-200/80 space-y-6">
+            <div className="lg:col-span-4 bg-white text-[#26301C] rounded-3xl p-6 shadow-md shadow-[#3E4B2F]/5 border border-[#C9A84E]/25 space-y-6">
               <div>
-                <h3 className="text-lg font-bold uppercase tracking-wider text-amber-600 flex items-center gap-2">
-                  <Clock className="w-5 h-5 text-amber-600" />
-                  Locked Table Bookings
+                <h3 className="text-lg font-serif font-bold uppercase tracking-wider text-[#3E4B2F] flex items-center gap-2">
+                  <Clock className="w-5 h-5 text-[#C9A84E]" />
+                  Delish Table Reservations
                 </h3>
-                <p className="text-xs text-slate-500 uppercase tracking-wider mt-1 font-bold">Guests scheduled for today's dining tables.</p>
+                <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-bold">Confirmed table bookings scheduled for service.</p>
               </div>
 
-              <div className="space-y-4 max-h-[460px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
+              <div className="space-y-4 max-h-[460px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-[#ECE4D4] scrollbar-track-transparent">
                 {allReservations.filter((r) => r.status === "confirmed").length === 0 ? (
-                  <div className="text-center py-12 border border-slate-100 rounded-2xl bg-slate-50">
-                    <Users className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                    <span className="block text-xs text-slate-400 font-bold uppercase tracking-widest">No table bookings active.</span>
+                  <div className="text-center py-12 border border-[#C9A84E]/20 rounded-2xl bg-[#FAF8F3]">
+                    <Users className="w-8 h-8 text-stone-300 mx-auto mb-2" />
+                    <span className="block text-xs text-[#52633E] font-bold uppercase tracking-widest">No table bookings active.</span>
                   </div>
                 ) : (
                   allReservations
@@ -1929,24 +2289,24 @@ export default function App() {
                     .map((r) => (
                       <div
                         key={r.id}
-                        className="bg-slate-50 border border-slate-100 rounded-2xl p-4.5 space-y-3.5 hover:border-amber-600/40 transition-all shadow-sm"
+                        className="bg-[#FAF8F3] border border-[#C9A84E]/25 rounded-2xl p-4.5 space-y-3.5 hover:border-[#3E4B2F] transition-all shadow-sm"
                       >
                         <div className="flex justify-between items-start">
                           <div>
-                            <span className="text-[9px] text-amber-700 uppercase font-bold tracking-widest block">
+                            <span className="text-[9px] text-[#3E4B2F] uppercase font-bold tracking-widest block font-mono">
                               Table {r.table}
                             </span>
-                            <span className="text-sm font-bold uppercase block mt-0.5 text-slate-900">{r.name}</span>
+                            <span className="text-sm font-serif font-bold uppercase block mt-0.5 text-[#26301C]">{r.name}</span>
                           </div>
-                          <span className="text-[9px] font-bold uppercase tracking-widest bg-white text-slate-700 border border-slate-200 px-2 py-1 rounded-md shadow-sm">
+                          <span className="text-[9px] font-bold uppercase tracking-widest bg-white text-[#3E4B2F] border border-[#C9A84E]/30 px-2 py-1 rounded-md shadow-sm">
                             {r.guests} Guests
                           </span>
                         </div>
 
-                        <div className="text-[10px] text-slate-600 space-y-1 uppercase tracking-wider bg-white p-2.5 rounded-xl border border-slate-100">
-                          <p className="flex items-center gap-2"><Calendar className="w-3.5 h-3.5 text-slate-400" /> {r.date}</p>
-                          <p className="flex items-center gap-2"><Clock className="w-3.5 h-3.5 text-slate-400" /> {r.time}</p>
-                          <p className="flex items-center gap-2"><Phone className="w-3.5 h-3.5 text-slate-400" /> {r.phone}</p>
+                        <div className="text-[10px] text-[#52633E] space-y-1 uppercase tracking-wider bg-white p-2.5 rounded-xl border border-[#C9A84E]/20 font-semibold">
+                          <p className="flex items-center gap-2"><Calendar className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.date}</p>
+                          <p className="flex items-center gap-2"><Clock className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.time}</p>
+                          <p className="flex items-center gap-2"><Phone className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.phone}</p>
                         </div>
                       </div>
                     ))
@@ -1956,18 +2316,20 @@ export default function App() {
           </div>
 
           {/* Table QR Code Generator - Directly built-in for extreme value */}
-          <div className="bg-white border border-slate-200/80 rounded-3xl p-6 sm:p-8 shadow-md shadow-slate-100/50 space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-5">
+          <div className="bg-white border border-[#C9A84E]/25 rounded-3xl p-6 sm:p-8 shadow-md shadow-[#3E4B2F]/5 space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#F4EFE6] pb-5">
               <div>
-                <h3 className="text-xl font-bold uppercase tracking-wider text-slate-900 flex items-center gap-2">
-                  <QrCode className="w-5 h-5 text-amber-600 animate-pulse" />
-                  Table QR Code Generator
+                <h3 className="text-xl font-serif font-bold uppercase tracking-wider text-[#26301C] flex items-center gap-2">
+                  <QrCode className="w-5 h-5 text-[#C9A84E]" />
+                  Delish Cafe QR Code Generator
                 </h3>
-                <p className="text-xs text-slate-500 uppercase tracking-wider mt-1">Print these QR codes and stick them onto tables. Scanning instantly logs users into the app with that specific table.</p>
+                <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">
+                  Print these QR codes and place on cafe tables. Scanning instantly loads Delish Cafe with that specific table locked in!
+                </p>
               </div>
               <button
                 onClick={() => window.print()}
-                className="bg-slate-950 hover:bg-slate-800 text-white font-bold uppercase tracking-widest text-xs px-5 py-3 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 self-start sm:self-auto"
+                className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-xs px-5 py-3 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 self-start sm:self-auto border border-[#C9A84E]/30"
               >
                 <Printer className="w-4 h-4" />
                 Print QR Sheets
@@ -1975,9 +2337,8 @@ export default function App() {
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-5">
-              {Array.from({ length: 15 }, (_, i) => {
+              {Array.from({ length: TOTAL_TABLES }, (_, i) => {
                 const num = i + 1;
-                // Generate the exact self referential link inside AI Studio
                 const baseHref = typeof window !== "undefined" ? window.location.origin : "";
                 const tableUrl = `${baseHref}/?table=${num}`;
                 const qrImg = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(tableUrl)}`;
@@ -1985,19 +2346,22 @@ export default function App() {
                 return (
                   <div
                     key={num}
-                    className="border border-slate-100 rounded-2xl p-4 text-center bg-slate-50 space-y-3.5 flex flex-col items-center justify-between shadow-sm hover:border-amber-600 transition-all"
+                    className="border border-[#C9A84E]/25 rounded-2xl p-4 text-center bg-[#FAF8F3] space-y-3.5 flex flex-col items-center justify-between shadow-sm hover:border-[#3E4B2F] transition-all"
                   >
-                    <h4 className="font-bold uppercase tracking-wider text-slate-900 text-xs">Table {num}</h4>
-                    <div className="w-28 h-28 bg-white p-2 rounded-xl border border-slate-200 shadow-inner">
+                    <div className="flex items-center justify-between w-full">
+                      <h4 className="font-serif font-bold uppercase tracking-wider text-[#26301C] text-xs">Table {num}</h4>
+                      <DelishLogo className="w-6 h-6" />
+                    </div>
+                    <div className="w-28 h-28 bg-white p-2 rounded-xl border border-[#C9A84E]/30 shadow-inner">
                       <img src={qrImg} alt={`QR Table ${num}`} className="w-full h-full object-contain" />
                     </div>
                     <div className="space-y-1 w-full">
-                      <span className="block text-[8px] text-slate-400 font-bold truncate tracking-tight">{tableUrl}</span>
+                      <span className="block text-[8px] text-[#52633E] font-bold truncate tracking-tight">{tableUrl}</span>
                       <a
                         href={tableUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="inline-block text-[9px] text-amber-700 hover:text-amber-800 font-bold uppercase tracking-widest underline cursor-pointer"
+                        className="inline-block text-[9px] text-[#3E4B2F] hover:text-[#26301C] font-bold uppercase tracking-widest underline cursor-pointer"
                       >
                         Launch Direct &rarr;
                       </a>
@@ -2012,72 +2376,74 @@ export default function App() {
       </div>
 
       {/* ================= FOOTER ================= */}
-      <footer className="bg-slate-950 text-white border-t border-slate-900 py-16">
+      <footer className="bg-[#26301C] text-[#FAF8F3] border-t border-[#C9A84E]/30 py-16">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 grid grid-cols-1 md:grid-cols-4 gap-10">
           <div className="space-y-4">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-amber-500 flex items-center justify-center text-slate-950 font-bold shadow-md shadow-amber-500/20">
-                <Utensils className="w-5 h-5" />
-              </div>
-              <span className="text-lg font-bold tracking-tight">
-                Smart<span className="text-amber-400">Menu</span>
+              <DelishLogo className="w-10 h-10 border border-[#C9A84E]/50 shadow-sm" />
+              <span className="text-xl font-serif font-bold tracking-tight text-[#FAF8F3]">
+                Delish <span className="text-[#C9A84E] italic">Cafe</span>
               </span>
             </div>
-            <p className="text-xs text-slate-400 leading-relaxed">
-               Ahmedabad's revolutionary contactless digital dining experience. Order gourmet food directly from kitchen to table in minutes.
+            <p className="text-xs text-[#FAF8F3]/70 leading-relaxed font-sans">
+              Ahmedabad's premier 100% Pure Vegetarian artisan cafe, specialty roastery & Italian sourdough kitchen. Contactless digital dining powered by SmartMenu.
             </p>
-          </div>
-
-          <div className="space-y-3">
-            <h5 className="font-extrabold text-xs uppercase tracking-widest text-amber-400">Opening Hours</h5>
-            <div className="text-xs text-slate-400 space-y-1.5 font-medium">
-              <p>Monday - Friday: 11:00 AM - 10:00 PM</p>
-              <p>Saturday - Sunday: 11:30 AM - 11:00 PM</p>
-              <p className="text-amber-500/80">&bull; Kitchen takes final slots at 9:30 PM</p>
+            <div className="inline-flex items-center gap-2 bg-[#3E4B2F] px-2.5 py-1 rounded-full text-[10px] font-bold tracking-widest uppercase text-[#C9A84E] border border-[#C9A84E]/30">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              100% Pure Veg Certified
             </div>
           </div>
 
           <div className="space-y-3">
-            <h5 className="font-extrabold text-xs uppercase tracking-widest text-amber-400">Our Cuisine</h5>
-            <div className="text-xs text-slate-400 space-y-1.5 font-semibold">
-              <p className="hover:text-amber-400 transition-colors cursor-pointer" onClick={() => handleScrollTo(menuRef)}>Gourmet Pizzas</p>
-              <p className="hover:text-amber-400 transition-colors cursor-pointer" onClick={() => handleScrollTo(menuRef)}>Flame Grilled Burgers</p>
-              <p className="hover:text-amber-400 transition-colors cursor-pointer" onClick={() => handleScrollTo(menuRef)}>Bechamel White Pasta</p>
-              <p className="hover:text-amber-400 transition-colors cursor-pointer" onClick={() => handleScrollTo(menuRef)}>Premium Fudge Fudge Cake</p>
+            <h5 className="font-serif font-bold text-xs uppercase tracking-widest text-[#C9A84E]">Opening Hours</h5>
+            <div className="text-xs text-[#FAF8F3]/70 space-y-1.5 font-medium">
+              <p>Monday - Friday: 8:00 AM - 11:30 PM</p>
+              <p>Saturday - Sunday: 8:00 AM - Midnight</p>
+              <p className="text-[#C9A84E] font-bold">&bull; Kitchen takes final orders at 11:00 PM</p>
             </div>
           </div>
 
           <div className="space-y-3">
-            <h5 className="font-extrabold text-xs uppercase tracking-widest text-amber-400">Tech Features</h5>
-            <div className="text-xs text-slate-400 space-y-1.5 font-medium leading-relaxed">
-              <p>&bull; Live Slot Table Checker</p>
-              <p>&bull; QR Self-logging Routing</p>
-              <p>&bull; Real-time Order Status Pipeline</p>
-              <p>&bull; Multi-mode Payment Wire Ready</p>
+            <h5 className="font-serif font-bold text-xs uppercase tracking-widest text-[#C9A84E]">Our Signatures</h5>
+            <div className="text-xs text-[#FAF8F3]/70 space-y-1.5 font-semibold">
+              <p className="hover:text-[#C9A84E] transition-colors cursor-pointer" onClick={() => handleScrollTo(menuRef)}>Specialty Espresso & Lattes</p>
+              <p className="hover:text-[#C9A84E] transition-colors cursor-pointer" onClick={() => handleScrollTo(menuRef)}>Artisan Sourdough Pizzas</p>
+              <p className="hover:text-[#C9A84E] transition-colors cursor-pointer" onClick={() => handleScrollTo(menuRef)}>Handmade Creamy Pastas</p>
+              <p className="hover:text-[#C9A84E] transition-colors cursor-pointer" onClick={() => handleScrollTo(menuRef)}>Lotus Biscoff Thick Shakes</p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <h5 className="font-serif font-bold text-xs uppercase tracking-widest text-[#C9A84E]">SmartMenu Tech</h5>
+            <div className="text-xs text-[#FAF8F3]/70 space-y-1.5 font-medium leading-relaxed">
+              <p>&bull; Contactless Table QR Ordering</p>
+              <p>&bull; Live Slot Availability Checker</p>
+              <p>&bull; Kitchen Status Pipeline</p>
+              <p>&bull; Instant Digital Bill / Invoice</p>
             </div>
           </div>
         </div>
 
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-10 mt-10 border-t border-slate-900 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500 gap-4">
-          <p>&copy; 2026 SmartMenu Restaurant. All rights reserved.</p>
-          <div className="flex gap-6">
-            <a href="https://wa.me/919999999999" target="_blank" rel="noreferrer" className="hover:text-emerald-400 transition-colors font-semibold">WhatsApp Desk</a>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-10 mt-10 border-t border-white/10 flex flex-col sm:flex-row items-center justify-between text-xs text-[#FAF8F3]/50 gap-4">
+          <p>&copy; 2026 Delish Cafe &bull; Powered by SmartMenu Digital Ordering Platform.</p>
+          <div className="flex gap-6 items-center">
+            <a href="https://wa.me/919876543210" target="_blank" rel="noreferrer" className="hover:text-emerald-400 transition-colors font-semibold">WhatsApp Desk</a>
             <span>&bull;</span>
-            <span className="hover:text-amber-400 transition-colors font-semibold cursor-pointer" onClick={() => setShowAdminLogin(true)}>Owner Portal</span>
+            <span className="hover:text-[#C9A84E] transition-colors font-semibold cursor-pointer" onClick={() => setShowAdminLogin(true)}>Owner Portal</span>
           </div>
         </div>
       </footer>
 
       {/* ================= WHATSAPP FLOATING BUBBLE ================= */}
       <a
-        href="https://wa.me/919999999999"
+        href="https://wa.me/919876543210"
         target="_blank"
         rel="noreferrer"
         className="fixed bottom-6 right-6 w-14 h-14 bg-[#25D366] text-white rounded-full flex items-center justify-center text-3xl shadow-2xl hover:scale-110 active:scale-95 transition-all z-35 group"
         title="Chat on WhatsApp"
       >
-        <span className="absolute right-16 bg-slate-900 text-white text-[10px] font-bold px-3 py-1.5 rounded-lg shadow-md opacity-0 group-hover:opacity-100 transition-all pointer-events-none whitespace-nowrap">
-          WhatsApp Support Desk
+        <span className="absolute right-16 bg-[#26301C] text-white text-[10px] font-bold px-3 py-1.5 rounded-lg shadow-md opacity-0 group-hover:opacity-100 transition-all pointer-events-none whitespace-nowrap border border-[#C9A84E]/40">
+          Delish Cafe WhatsApp Desk
         </span>
         <svg viewBox="0 0 24 24" className="w-7 h-7 fill-white">
           <path d="M.057 24l1.687-6.163c-1.041-1.804-1.588-3.849-1.587-5.946C.06 5.348 5.397.01 12.008.01c3.202.001 6.212 1.246 8.477 3.513 2.262 2.268 3.507 5.28 3.505 8.484-.004 6.657-5.34 11.997-11.953 11.997-2.005-.001-3.973-.502-5.724-1.455L0 24zm6.59-4.846c1.66.986 3.296 1.481 4.964 1.483 5.482 0 9.943-4.437 9.946-9.897.002-2.643-1.026-5.131-2.898-7.005-1.871-1.872-4.364-2.9-7.01-2.902-5.485 0-9.945 4.438-9.948 9.9.001 1.768.486 3.49 1.4 5.013l-.995 3.637 3.74-.982z" />
@@ -2085,7 +2451,7 @@ export default function App() {
       </a>
       <AnimatePresence>
         {isYourOrdersOpen && (
-          <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/80 backdrop-blur-sm">
+          <div className="fixed inset-0 z-50 flex justify-end bg-[#26301C]/80 backdrop-blur-sm">
             {/* Backdrop closer */}
             <div className="absolute inset-0 cursor-pointer" onClick={() => setIsYourOrdersOpen(false)} />
 
@@ -2094,30 +2460,30 @@ export default function App() {
               animate={{ x: 0 }}
               exit={{ x: "100%" }}
               transition={{ type: "tween", duration: 0.3 }}
-              className="relative w-full max-w-md bg-white text-slate-800 h-full shadow-2xl flex flex-col justify-between border-l border-slate-200"
+              className="relative w-full max-w-md bg-white text-[#26301C] h-full shadow-2xl flex flex-col justify-between border-l border-[#C9A84E]/30"
             >
-              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Receipt className="w-5 h-5 text-amber-600 animate-bounce" />
-                  <h3 className="font-extrabold uppercase tracking-wider text-slate-900 text-base">Your Orders</h3>
+              <div className="p-6 border-b border-[#F4EFE6] flex items-center justify-between bg-[#FAF8F3]">
+                <div className="flex items-center gap-2.5">
+                  <Receipt className="w-5 h-5 text-[#C9A84E]" />
+                  <h3 className="font-serif font-bold uppercase tracking-wider text-[#26301C] text-base">Your Cafe Orders</h3>
                 </div>
                 <button
                   onClick={() => setIsYourOrdersOpen(false)}
-                  className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-800 flex items-center justify-center transition-colors cursor-pointer"
+                  className="w-8 h-8 rounded-full bg-white hover:bg-[#FAF8F3] text-[#52633E] hover:text-[#26301C] flex items-center justify-center border border-[#C9A84E]/30 transition-colors cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
 
               {/* Orders List */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-4 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
+              <div className="flex-1 overflow-y-auto p-6 space-y-4 scrollbar-thin scrollbar-thumb-[#ECE4D4] scrollbar-track-transparent bg-white">
                 {allOrders.filter((o) => userOrderIds.includes(o.id)).length === 0 ? (
                   <div className="text-center py-24 space-y-3">
-                    <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+                    <div className="w-12 h-12 rounded-full bg-[#FAF8F3] border border-[#C9A84E]/30 text-[#C9A84E] flex items-center justify-center mx-auto">
                       <Receipt className="w-6 h-6" />
                     </div>
-                    <h5 className="font-bold uppercase tracking-wider text-slate-900">No Orders Placed Yet</h5>
-                    <p className="text-xs text-slate-400 max-w-xs mx-auto uppercase tracking-wider leading-relaxed">
+                    <h5 className="font-serif font-bold uppercase tracking-wider text-[#26301C]">No Active Orders</h5>
+                    <p className="text-xs text-[#52633E] max-w-xs mx-auto uppercase tracking-wider leading-relaxed font-semibold">
                       Your placed orders will show up here, even after refreshing the page!
                     </p>
                   </div>
@@ -2129,21 +2495,21 @@ export default function App() {
                       return (
                         <div
                           key={order.id}
-                          className={`bg-slate-50 border rounded-2xl p-4.5 space-y-3.5 shadow-sm transition-all duration-300 ${
-                            isCompleted ? "border-slate-200/60 opacity-80" : "border-amber-600/40 hover:border-amber-600"
+                          className={`bg-[#FAF8F3] border rounded-2xl p-4.5 space-y-3.5 shadow-sm transition-all duration-300 ${
+                            isCompleted ? "border-stone-200 opacity-80" : "border-[#C9A84E]/40 hover:border-[#3E4B2F]"
                           }`}
                         >
                           <div className="flex justify-between items-start">
                             <div>
                               <span className={`inline-block px-2.5 py-0.5 rounded-md text-[9px] font-bold tracking-widest uppercase mb-1.5 ${
                                 order.orderType === "delivery"
-                                  ? "bg-indigo-50 text-indigo-700 border border-indigo-200"
-                                  : "bg-amber-50 text-amber-700 border border-amber-200"
+                                  ? "bg-amber-50 text-amber-800 border border-amber-200"
+                                  : "bg-white text-[#3E4B2F] border border-[#C9A84E]/40"
                               }`}>
                                 {order.orderType === "delivery" ? "🚀 Delivery" : `🪑 Table ${order.tableNumber}`}
                               </span>
-                              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-850 font-mono">{order.id}</h4>
-                              <span className="block text-[8px] text-slate-400 uppercase tracking-widest mt-0.5">{order.createdAt}</span>
+                              <h4 className="text-xs font-bold uppercase tracking-wider text-[#26301C] font-mono">{order.id}</h4>
+                              <span className="block text-[8px] text-[#52633E] uppercase tracking-widest mt-0.5">{order.createdAt}</span>
                             </div>
                             <span className={`px-2.5 py-1 rounded-md text-[9px] font-bold uppercase tracking-widest ${
                               order.status === "Completed"
@@ -2152,31 +2518,31 @@ export default function App() {
                                 ? "bg-teal-50 text-teal-700 border border-teal-200 animate-pulse"
                                 : order.status === "Preparing"
                                 ? "bg-amber-50 text-amber-700 border border-amber-200"
-                                : "bg-slate-100 text-slate-700 border border-slate-200"
+                                : "bg-white text-stone-700 border border-stone-200"
                             }`}>
                               {order.status}
                             </span>
                           </div>
 
                           {/* Items and Subtotal */}
-                          <div className="bg-white p-3 rounded-xl border border-slate-100 text-xs text-slate-700 space-y-1.5">
+                          <div className="bg-white p-3 rounded-xl border border-[#C9A84E]/20 text-xs text-stone-700 space-y-1.5">
                             {order.items.map((it, idx) => (
                               <p key={idx} className="flex justify-between font-bold uppercase tracking-wider text-[10px]">
-                                <span className="text-slate-800">
-                                  {it.name} <span className="text-[9px] text-slate-400 font-bold">×{it.quantity}</span>
+                                <span className="text-[#26301C]">
+                                  {it.name} <span className="text-[9px] text-[#52633E] font-bold">×{it.quantity}</span>
                                 </span>
-                                <span className="text-slate-900">₹{it.price * it.quantity}</span>
+                                <span className="text-[#26301C] font-mono">₹{it.price * it.quantity}</span>
                               </p>
                             ))}
                           </div>
 
-                          <div className="flex items-center justify-between pt-2.5 border-t border-slate-100 mt-2.5">
-                            <span className="text-sm font-bold text-slate-950">Total: ₹{order.total}</span>
+                          <div className="flex items-center justify-between pt-2.5 border-t border-[#C9A84E]/20 mt-2.5">
+                            <span className="text-sm font-serif font-bold text-[#26301C]">Total: ₹{order.total}</span>
                             <button
                               onClick={() => setSelectedBillOrder(order)}
-                              className="bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 font-bold uppercase tracking-widest text-[9px] px-3 py-1.5 rounded-xl transition-all flex items-center gap-1 shadow-sm"
+                              className="bg-white hover:bg-[#FAF8F3] text-[#3E4B2F] border border-[#C9A84E]/30 font-bold uppercase tracking-widest text-[9px] px-3 py-1.5 rounded-xl transition-all flex items-center gap-1 shadow-sm"
                             >
-                              <Receipt className="w-3.5 h-3.5" /> View Bill
+                              <Receipt className="w-3.5 h-3.5 text-[#C9A84E]" /> View Bill
                             </button>
                           </div>
                         </div>
@@ -2186,8 +2552,8 @@ export default function App() {
               </div>
 
               {/* Footer inside drawer */}
-              <div className="p-6 bg-slate-50 border-t border-slate-200 text-center">
-                <p className="text-[9px] uppercase tracking-widest text-slate-400 font-bold">SmartMenu Digital Kitchen Integration</p>
+              <div className="p-6 bg-[#FAF8F3] border-t border-[#C9A84E]/20 text-center">
+                <p className="text-[9px] uppercase tracking-widest text-[#52633E] font-bold">Delish Cafe &bull; SmartMenu Kitchen Engine</p>
               </div>
             </motion.div>
           </div>
@@ -2196,7 +2562,7 @@ export default function App() {
 
       <AnimatePresence>
         {isCartOpen && (
-          <div className="fixed inset-0 z-50 flex justify-end bg-slate-950/80 backdrop-blur-sm">
+          <div className="fixed inset-0 z-50 flex justify-end bg-[#26301C]/80 backdrop-blur-sm">
             {/* Backdrop closer */}
             <div className="absolute inset-0 cursor-pointer" onClick={() => setIsCartOpen(false)} />
 
@@ -2205,60 +2571,60 @@ export default function App() {
               animate={{ x: 0 }}
               exit={{ x: "100%" }}
               transition={{ type: "tween", duration: 0.3 }}
-              className="relative w-full max-w-md bg-white text-slate-800 h-full shadow-2xl flex flex-col justify-between border-l border-slate-200"
+              className="relative w-full max-w-md bg-white text-[#26301C] h-full shadow-2xl flex flex-col justify-between border-l border-[#C9A84E]/30"
             >
-              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <ShoppingCart className="w-5 h-5 text-amber-600 animate-bounce" />
-                  <h3 className="font-extrabold uppercase tracking-wider text-slate-900 text-base">Your Culinary Cart</h3>
+              <div className="p-6 border-b border-[#F4EFE6] flex items-center justify-between bg-[#FAF8F3]">
+                <div className="flex items-center gap-2.5">
+                  <ShoppingCart className="w-5 h-5 text-[#C9A84E]" />
+                  <h3 className="font-serif font-bold uppercase tracking-wider text-[#26301C] text-base">Your Delish Tray</h3>
                 </div>
                 <button
                   onClick={() => setIsCartOpen(false)}
-                  className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-800 flex items-center justify-center transition-colors cursor-pointer"
+                  className="w-8 h-8 rounded-full bg-white hover:bg-[#FAF8F3] text-[#52633E] hover:text-[#26301C] flex items-center justify-center border border-[#C9A84E]/30 transition-colors cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
 
               {/* Items List */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-4 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
+              <div className="flex-1 overflow-y-auto p-6 space-y-4 scrollbar-thin scrollbar-thumb-[#ECE4D4] scrollbar-track-transparent bg-white">
                 {cart.length === 0 ? (
                   <div className="text-center py-24 space-y-3">
-                    <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
+                    <div className="w-12 h-12 rounded-full bg-[#FAF8F3] border border-[#C9A84E]/30 text-[#C9A84E] flex items-center justify-center mx-auto">
                       <ShoppingCart className="w-6 h-6" />
                     </div>
-                    <h5 className="font-bold uppercase tracking-wider text-slate-900">Your Cart is Empty</h5>
-                    <p className="text-xs text-slate-400 max-w-xs mx-auto uppercase tracking-wider">Browse our delicious pizzas and sides above and fill your tray!</p>
+                    <h5 className="font-serif font-bold uppercase tracking-wider text-[#26301C]">Your Tray is Empty</h5>
+                    <p className="text-xs text-[#52633E] max-w-xs mx-auto uppercase tracking-wider font-semibold">Browse our coffees, artisan pizzas, pastas & shakes above to add items!</p>
                   </div>
                 ) : (
                   cart.map((item) => (
                     <div
                       key={item.name}
-                      className="bg-slate-50 border border-slate-100 rounded-2xl p-4 flex items-center justify-between gap-4 shadow-sm hover:border-amber-600/40 transition-all"
+                      className="bg-[#FAF8F3] border border-[#C9A84E]/25 rounded-2xl p-4 flex items-center justify-between gap-4 shadow-sm hover:border-[#3E4B2F] transition-all"
                     >
                       <div className="flex-1">
-                        <h4 className="font-bold text-xs text-slate-900 uppercase tracking-wider">{item.name}</h4>
-                        <p className="text-[9px] text-slate-400 uppercase tracking-widest mt-0.5">₹{item.price} per dish</p>
-                        <p className="text-xs font-bold text-amber-700 uppercase tracking-widest mt-1.5">Subtotal: ₹{item.price * item.quantity}</p>
+                        <h4 className="font-serif font-bold text-xs text-[#26301C] uppercase tracking-wider">{item.name}</h4>
+                        <p className="text-[9px] text-[#52633E] uppercase tracking-widest mt-0.5">₹{item.price} per item</p>
+                        <p className="text-xs font-bold text-[#3E4B2F] uppercase tracking-widest mt-1.5 font-mono">Subtotal: ₹{item.price * item.quantity}</p>
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
                         <button
                           onClick={() => updateCartQty(item.name, -1)}
-                          className="w-7 h-7 rounded-lg bg-white border border-slate-200 hover:border-amber-600 flex items-center justify-center text-slate-800 font-bold text-xs transition-colors cursor-pointer"
+                          className="w-7 h-7 rounded-lg bg-white border border-[#C9A84E]/30 hover:border-[#3E4B2F] flex items-center justify-center text-[#26301C] font-bold text-xs transition-colors cursor-pointer"
                         >
                           <Minus className="w-3.5 h-3.5" />
                         </button>
-                        <span className="font-bold text-xs text-slate-900 w-5 text-center">{item.quantity}</span>
+                        <span className="font-bold text-xs text-[#26301C] w-5 text-center">{item.quantity}</span>
                         <button
                           onClick={() => updateCartQty(item.name, 1)}
-                          className="w-7 h-7 rounded-lg bg-white border border-slate-200 hover:border-amber-600 flex items-center justify-center text-slate-800 font-bold text-xs transition-colors cursor-pointer"
+                          className="w-7 h-7 rounded-lg bg-white border border-[#C9A84E]/30 hover:border-[#3E4B2F] flex items-center justify-center text-[#26301C] font-bold text-xs transition-colors cursor-pointer"
                         >
                           <Plus className="w-3.5 h-3.5" />
                         </button>
                         <button
                           onClick={() => removeFromCart(item.name)}
-                          className="text-slate-400 hover:text-rose-600 transition-colors p-1 cursor-pointer"
+                          className="text-[#52633E] hover:text-rose-600 transition-colors p-1 cursor-pointer"
                           title="Remove item"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -2270,27 +2636,27 @@ export default function App() {
               </div>
 
               {/* Checkout details */}
-              <div className="p-6 bg-slate-50 border-t border-slate-200 space-y-4">
-                <div className="flex items-center justify-between font-bold uppercase tracking-wider text-slate-900">
-                  <span>Grand Total Amount</span>
-                  <span className="text-2xl text-amber-700 font-bold italic">₹{cartTotal}</span>
+              <div className="p-6 bg-[#FAF8F3] border-t border-[#C9A84E]/25 space-y-4">
+                <div className="flex items-center justify-between font-bold uppercase tracking-wider text-[#26301C]">
+                  <span className="font-serif text-sm">Grand Total Amount</span>
+                  <span className="text-2xl text-[#3E4B2F] font-serif font-black italic">₹{cartTotal}</span>
                 </div>
                 {orderType === "dine_in" && activeTableLabel && (
-                  <div className="p-2.5 bg-amber-50 text-amber-700 text-[10px] rounded-lg border border-amber-200 font-bold uppercase tracking-wider text-center">
-                    Ordering for Table <span className="font-bold italic text-sm text-amber-600">{activeTableLabel}</span>
+                  <div className="p-2.5 bg-white text-[#3E4B2F] text-[10px] rounded-lg border border-[#C9A84E]/30 font-bold uppercase tracking-wider text-center">
+                    Dining at Table <span className="font-bold italic text-sm text-[#C9A84E]">{activeTableLabel}</span>
                   </div>
                 )}
                 {orderType === "delivery" && deliveryAddress.trim() && (
-                  <div className="p-2.5 bg-indigo-50 text-indigo-700 text-[9px] rounded-lg border border-indigo-200 font-bold uppercase tracking-wider truncate">
-                    Deliver: <span className="text-slate-600">{deliveryAddress}</span>
+                  <div className="p-2.5 bg-white text-amber-900 text-[9px] rounded-lg border border-amber-200 font-bold uppercase tracking-wider truncate">
+                    Deliver to: <span className="text-[#52633E]">{deliveryAddress}</span>
                   </div>
                 )}
                 <button
                   onClick={handlePlaceOrderClick}
                   disabled={cart.length === 0}
-                  className="w-full bg-slate-950 hover:bg-slate-900 disabled:opacity-40 text-white font-bold py-4 rounded-xl transition-all hover:scale-[1.01] active:scale-[0.99] text-xs cursor-pointer shadow-md flex items-center justify-center gap-2 uppercase tracking-widest"
+                  className="w-full bg-[#3E4B2F] hover:bg-[#323E25] disabled:opacity-40 text-white font-bold py-4 rounded-xl transition-all hover:scale-[1.01] active:scale-[0.99] text-xs cursor-pointer shadow-md flex items-center justify-center gap-2 uppercase tracking-widest border border-[#C9A84E]/30"
                 >
-                  Place Kitchen Order
+                  Place Cafe Order
                 </button>
               </div>
             </motion.div>
@@ -2301,69 +2667,69 @@ export default function App() {
       {/* ================= ORDER SUMMARY MODAL ================= */}
       <AnimatePresence>
         {showSummaryModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#26301C]/80 backdrop-blur-sm">
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white text-slate-800 w-full max-w-lg rounded-3xl p-6 sm:p-8 shadow-2xl border border-slate-200 relative"
+              className="bg-white text-[#26301C] w-full max-w-lg rounded-3xl p-6 sm:p-8 shadow-2xl border border-[#C9A84E]/30 relative"
             >
               <button
                 onClick={() => setShowSummaryModal(false)}
-                className="absolute top-6 right-6 w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+                className="absolute top-6 right-6 w-9 h-9 rounded-full bg-[#FAF8F3] flex items-center justify-center text-[#52633E] hover:text-[#26301C] border border-[#C9A84E]/20 transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
               <div className="mb-6">
-                <h2 className="text-2xl font-extrabold uppercase tracking-tight text-slate-900">Order Summary</h2>
-                <p className="text-xs text-slate-500 uppercase tracking-wider mt-1 font-semibold">Please double check your tray items and preferences.</p>
+                <h2 className="text-2xl font-serif font-bold uppercase tracking-tight text-[#26301C]">Order Summary</h2>
+                <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">Please review your Delish Cafe items and dining option.</p>
               </div>
 
-              <div className="bg-slate-50 rounded-2xl p-4.5 border border-slate-200/60 space-y-4 max-h-[250px] overflow-y-auto">
-                <div className="flex justify-between items-center text-xs pb-3 border-b border-slate-200/60 font-bold uppercase tracking-wider">
-                  <span className="text-slate-500">Order Preference</span>
-                  <span className="text-amber-700 font-extrabold tracking-widest">
-                    {orderType === "delivery" ? "🏠 Delivery" : `🪑 Table ${activeTableLabel}`}
+              <div className="bg-[#FAF8F3] rounded-2xl p-4.5 border border-[#C9A84E]/25 space-y-4 max-h-[250px] overflow-y-auto">
+                <div className="flex justify-between items-center text-xs pb-3 border-b border-[#C9A84E]/20 font-bold uppercase tracking-wider">
+                  <span className="text-[#52633E]">Dining Preference</span>
+                  <span className="text-[#3E4B2F] font-bold tracking-widest">
+                    {orderType === "delivery" ? "🏠 Home Delivery" : `🪑 Table ${activeTableLabel}`}
                   </span>
                 </div>
 
                 {orderType === "delivery" && (
-                  <div className="text-xs pb-3 border-b border-slate-200/60 font-bold uppercase tracking-wider">
-                    <span className="text-slate-400 block mb-0.5 tracking-widest text-[9px]">Delivery Address</span>
-                    <p className="text-slate-700 leading-normal font-bold">{deliveryAddress}</p>
+                  <div className="text-xs pb-3 border-b border-[#C9A84E]/20 font-bold uppercase tracking-wider">
+                    <span className="text-[#52633E] block mb-0.5 tracking-widest text-[9px]">Delivery Address</span>
+                    <p className="text-[#26301C] leading-normal font-bold">{deliveryAddress}</p>
                   </div>
                 )}
 
                 <div className="space-y-3">
-                  <span className="text-slate-400 block uppercase tracking-widest text-[9px] font-bold">Tray Items</span>
+                  <span className="text-[#52633E] block uppercase tracking-widest text-[9px] font-bold">Selected Dishes</span>
                   {cart.map((item) => (
                     <div key={item.name} className="flex justify-between items-center text-xs uppercase tracking-wider font-bold">
-                      <span className="text-slate-700 font-semibold">
-                        {item.name} <span className="text-slate-400 text-[9px] font-bold">×{item.quantity}</span>
+                      <span className="text-[#26301C] font-semibold">
+                        {item.name} <span className="text-[#52633E] text-[9px] font-bold">×{item.quantity}</span>
                       </span>
-                      <span className="font-extrabold text-slate-900">₹{item.price * item.quantity}</span>
+                      <span className="font-bold text-[#26301C] font-mono">₹{item.price * item.quantity}</span>
                     </div>
                   ))}
                 </div>
               </div>
 
-              <div className="pt-6 border-t border-slate-200/60 mt-6 flex items-center justify-between">
+              <div className="pt-6 border-t border-[#C9A84E]/25 mt-6 flex items-center justify-between">
                 <div>
-                  <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-widest">Total Payable</span>
-                  <span className="text-3xl font-extrabold italic text-amber-700">₹{cartTotal}</span>
+                  <span className="block text-[9px] text-[#52633E] uppercase font-bold tracking-widest">Total Payable</span>
+                  <span className="text-3xl font-serif font-black italic text-[#3E4B2F]">₹{cartTotal}</span>
                 </div>
                 <div className="flex gap-2">
                   <button
                     onClick={() => { setShowSummaryModal(false); setIsCartOpen(true); }}
-                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 px-4.5 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer"
+                    className="bg-[#FAF8F3] hover:bg-stone-100 text-[#26301C] border border-[#C9A84E]/30 px-4.5 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer"
                   >
                     Edit Cart
                   </button>
                   <button
                     onClick={proceedToPayment}
-                    className="bg-amber-600 hover:bg-amber-500 text-white px-5 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer"
+                    className="bg-[#3E4B2F] hover:bg-[#323E25] text-white px-5 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer shadow-md border border-[#C9A84E]/30"
                   >
-                    Select Payment
+                    Proceed to Pay
                   </button>
                 </div>
               </div>
@@ -2375,22 +2741,22 @@ export default function App() {
       {/* ================= PAYMENT OPTIONS MODAL ================= */}
       <AnimatePresence>
         {showPaymentModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#26301C]/80 backdrop-blur-sm">
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white text-slate-800 w-full max-w-lg rounded-3xl p-6 sm:p-8 shadow-2xl border border-slate-200 relative"
+              className="bg-white text-[#26301C] w-full max-w-lg rounded-3xl p-6 sm:p-8 shadow-2xl border border-[#C9A84E]/30 relative"
             >
               <button
                 onClick={() => setShowPaymentModal(false)}
-                className="absolute top-6 right-6 w-9 h-9 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+                className="absolute top-6 right-6 w-9 h-9 rounded-full bg-[#FAF8F3] flex items-center justify-center text-[#52633E] hover:text-[#26301C] border border-[#C9A84E]/20 transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
               <div className="mb-6">
-                <h2 className="text-2xl font-extrabold uppercase tracking-tight text-slate-900">Select Payment Method</h2>
-                <p className="text-xs text-slate-500 uppercase tracking-wider mt-1 font-semibold">UPI, Credit Card, and Cash at counter are supported.</p>
+                <h2 className="text-2xl font-serif font-bold uppercase tracking-tight text-[#26301C]">Select Payment Method</h2>
+                <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">UPI, Credit/Debit Card, Net Banking, and Pay at Counter are available.</p>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -2398,8 +2764,8 @@ export default function App() {
                   onClick={() => setSelectedPaymentMethod("upi")}
                   className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
                     selectedPaymentMethod === "upi"
-                      ? "bg-amber-50 border-amber-500 text-amber-700 font-extrabold"
-                      : "bg-slate-50 border-slate-200 hover:border-amber-500/50 text-slate-600"
+                      ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm"
+                      : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
                   }`}
                 >
                   <span className="text-2xl">📱</span>
@@ -2409,19 +2775,19 @@ export default function App() {
                   onClick={() => setSelectedPaymentMethod("card")}
                   className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
                     selectedPaymentMethod === "card"
-                      ? "bg-amber-50 border-amber-500 text-amber-700 font-extrabold"
-                      : "bg-slate-50 border-slate-200 hover:border-amber-500/50 text-slate-600"
+                      ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm"
+                      : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
                   }`}
                 >
                   <span className="text-2xl">💳</span>
-                  <span className="text-[10px] font-bold">Credit Card</span>
+                  <span className="text-[10px] font-bold">Credit/Debit Card</span>
                 </button>
                 <button
                   onClick={() => setSelectedPaymentMethod("netbanking")}
                   className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
                     selectedPaymentMethod === "netbanking"
-                      ? "bg-amber-50 border-amber-500 text-amber-700 font-extrabold"
-                      : "bg-slate-50 border-slate-200 hover:border-amber-500/50 text-slate-600"
+                      ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm"
+                      : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
                   }`}
                 >
                   <span className="text-2xl">🏦</span>
@@ -2431,8 +2797,8 @@ export default function App() {
                   onClick={() => setSelectedPaymentMethod("pay_at_counter")}
                   className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
                     selectedPaymentMethod === "pay_at_counter"
-                      ? "bg-amber-50 border-amber-500 text-amber-700 font-extrabold"
-                      : "bg-slate-50 border-slate-200 hover:border-amber-500/50 text-slate-600"
+                      ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm"
+                      : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
                   }`}
                 >
                   <span className="text-2xl">💰</span>
@@ -2440,21 +2806,21 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="bg-amber-50/50 border border-amber-200 p-4 rounded-2xl mt-6 space-y-1.5 text-[10px] text-amber-700 font-bold uppercase tracking-wider">
-                <p className="flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" /> Razorpay Secured Checkout Enabled</p>
-                <p className="text-slate-400 text-[9px] font-medium leading-normal normal-case">Payment processing is simulated for local preview. Confirming will instantly forward your order to chef's line.</p>
+              <div className="bg-[#FAF8F3] border border-[#C9A84E]/30 p-4 rounded-2xl mt-6 space-y-1.5 text-[10px] text-[#3E4B2F] font-bold uppercase tracking-wider">
+                <p className="flex items-center gap-1.5"><Clock className="w-3.5 h-3.5 text-[#C9A84E]" /> Razorpay Secured Checkout Enabled</p>
+                <p className="text-[#52633E] text-[9px] font-medium leading-normal normal-case">Integrated checkout flow ready. Confirming will instantly forward your order to Delish Cafe kitchen pipeline.</p>
               </div>
 
-              <div className="flex gap-2 pt-6 mt-6 border-t border-slate-200/60 justify-end">
+              <div className="flex gap-2 pt-6 mt-6 border-t border-[#C9A84E]/25 justify-end">
                 <button
                   onClick={() => { setShowPaymentModal(false); setShowSummaryModal(true); }}
-                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 px-4.5 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer"
+                  className="bg-[#FAF8F3] hover:bg-stone-100 text-[#26301C] border border-[#C9A84E]/30 px-4.5 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer"
                 >
                   Back
                 </button>
                 <button
                   onClick={handleConfirmOrder}
-                  className="bg-amber-600 hover:bg-amber-500 text-white px-6 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer shadow-md"
+                  className="bg-[#3E4B2F] hover:bg-[#323E25] text-white px-6 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer shadow-md border border-[#C9A84E]/30"
                 >
                   Confirm & Cook
                 </button>
@@ -2467,22 +2833,22 @@ export default function App() {
       {/* ================= BILL / INVOICE GENERATOR MODAL ================= */}
       <AnimatePresence>
         {selectedBillOrder && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm print:hidden">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#26301C]/80 backdrop-blur-sm print:hidden">
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white w-full max-w-lg rounded-3xl shadow-2xl border border-slate-100 overflow-hidden flex flex-col max-h-[90vh]"
+              className="bg-white w-full max-w-lg rounded-3xl shadow-2xl border border-[#C9A84E]/30 overflow-hidden flex flex-col max-h-[90vh]"
             >
               {/* Modal header with close button */}
-              <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+              <div className="p-6 border-b border-[#F4EFE6] flex items-center justify-between bg-[#FAF8F3]">
                 <div className="flex items-center gap-2">
-                  <Receipt className="w-5 h-5 text-amber-800" />
-                  <h3 className="font-extrabold uppercase tracking-wider text-slate-900 text-sm">Invoice Receipt</h3>
+                  <Receipt className="w-5 h-5 text-[#C9A84E]" />
+                  <h3 className="font-serif font-bold uppercase tracking-wider text-[#26301C] text-sm">Delish Cafe Invoice</h3>
                 </div>
                 <button
                   onClick={() => setSelectedBillOrder(null)}
-                  className="w-8 h-8 rounded-full bg-white flex items-center justify-center text-slate-400 hover:bg-slate-100 hover:text-slate-600 border border-slate-100 transition-colors cursor-pointer"
+                  className="w-8 h-8 rounded-full bg-white flex items-center justify-center text-[#52633E] hover:bg-[#FAF8F3] hover:text-[#26301C] border border-[#C9A84E]/30 transition-colors cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2491,25 +2857,26 @@ export default function App() {
               {/* Printable Invoice Container */}
               <div className="flex-1 overflow-y-auto p-8 space-y-6" id="printable-bill">
                 {/* Brand Header */}
-                <div className="text-center pb-6 border-b border-dashed border-slate-200">
-                  <span className="text-3xl font-black tracking-tighter uppercase italic text-slate-900">
-                    Smart<span className="text-amber-800">Menu</span>
+                <div className="text-center pb-6 border-b border-dashed border-[#C9A84E]/40">
+                  <DelishLogo className="w-14 h-14 mx-auto mb-2" />
+                  <span className="text-3xl font-serif font-black tracking-tight text-[#26301C]">
+                    Delish <span className="text-[#C9A84E] italic">Cafe</span>
                   </span>
-                  <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mt-1">Ahmedabad's Premier Dining Experience</p>
-                  <p className="text-[9px] text-slate-400 uppercase tracking-wider mt-0.5">Sarkhej - Gandhinagar Hwy, Ahmedabad, Gujarat</p>
-                  <p className="text-[9px] text-slate-400 uppercase tracking-wider">Phone: +91 9999999999 &bull; GSTIN: 24AAACS1234F1Z5</p>
+                  <p className="text-[10px] text-[#3E4B2F] font-bold uppercase tracking-widest mt-1">100% Pure Vegetarian Artisan Cafe & Specialty Roastery</p>
+                  <p className="text-[9px] text-[#52633E] uppercase tracking-wider mt-0.5">Sindhu Bhavan Marg, Bodakdev, Ahmedabad, Gujarat</p>
+                  <p className="text-[9px] text-[#52633E] uppercase tracking-wider">Phone: +91 98765 43210 &bull; GSTIN: 24AAACS1234F1Z5</p>
                 </div>
 
                 {/* Meta details */}
-                <div className="grid grid-cols-2 gap-4 text-[10px] uppercase tracking-wider font-semibold text-slate-600">
+                <div className="grid grid-cols-2 gap-4 text-[10px] uppercase tracking-wider font-semibold text-[#52633E]">
                   <div className="space-y-1">
-                    <p><span className="text-slate-400 font-bold">Invoice:</span> <span className="font-mono font-bold text-slate-900">{selectedBillOrder.id}</span></p>
-                    <p><span className="text-slate-400 font-bold">Date/Time:</span> <span className="text-slate-900">{selectedBillOrder.createdAt}</span></p>
+                    <p><span className="text-stone-400 font-bold">Invoice:</span> <span className="font-mono font-bold text-[#26301C]">{selectedBillOrder.id}</span></p>
+                    <p><span className="text-stone-400 font-bold">Date/Time:</span> <span className="text-[#26301C]">{selectedBillOrder.createdAt}</span></p>
                   </div>
                   <div className="space-y-1 text-right">
-                    <p><span className="text-slate-400 font-bold">Service:</span> <span className="text-slate-900 font-bold">{selectedBillOrder.orderType === "delivery" ? "Home Delivery" : `Table ${selectedBillOrder.tableNumber}`}</span></p>
+                    <p><span className="text-stone-400 font-bold">Service:</span> <span className="text-[#26301C] font-bold">{selectedBillOrder.orderType === "delivery" ? "Home Delivery" : `Table ${selectedBillOrder.tableNumber}`}</span></p>
                     <p>
-                      <span className="text-slate-400 font-bold">Status:</span>{" "}
+                      <span className="text-stone-400 font-bold">Status:</span>{" "}
                       <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${selectedBillOrder.status === "Completed" ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-amber-50 text-amber-700 border border-amber-200"}`}>
                         {selectedBillOrder.status === "Completed" ? "PAID & SETTLED" : selectedBillOrder.status.toUpperCase()}
                       </span>
@@ -2518,23 +2885,23 @@ export default function App() {
                 </div>
 
                 {/* Items Table */}
-                <div className="border-t border-b border-dashed border-slate-200 py-4">
+                <div className="border-t border-b border-dashed border-[#C9A84E]/40 py-4">
                   <table className="w-full text-left text-[10px] uppercase tracking-wider font-semibold">
                     <thead>
-                      <tr className="text-slate-400 border-b border-slate-100 pb-2">
+                      <tr className="text-[#52633E] border-b border-stone-100 pb-2">
                         <th className="py-1">Dishes Item</th>
                         <th className="text-center py-1">Qty</th>
                         <th className="text-right py-1">Rate</th>
                         <th className="text-right py-1">Amount</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100 text-slate-800">
+                    <tbody className="divide-y divide-stone-100 text-[#26301C]">
                       {selectedBillOrder.items.map((it, idx) => (
-                        <tr key={idx} className="hover:bg-slate-50/50">
+                        <tr key={idx} className="hover:bg-[#FAF8F3]/50">
                           <td className="py-2.5 font-bold">{it.name}</td>
                           <td className="text-center py-2.5 font-mono">{it.quantity}</td>
                           <td className="text-right py-2.5 font-mono">₹{it.price}</td>
-                          <td className="text-right py-2.5 font-mono font-bold text-slate-900">₹{it.price * it.quantity}</td>
+                          <td className="text-right py-2.5 font-mono font-bold text-[#26301C]">₹{it.price * it.quantity}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -2542,40 +2909,40 @@ export default function App() {
                 </div>
 
                 {/* Calculations */}
-                <div className="space-y-1.5 text-[10px] uppercase tracking-wider text-right font-semibold text-slate-600">
-                  <p>Subtotal: <span className="font-mono text-slate-900">₹{Math.round(selectedBillOrder.total * 0.95)}</span></p>
-                  <p>SGST (2.5%): <span className="font-mono text-slate-900">₹{Math.round(selectedBillOrder.total * 0.025)}</span></p>
-                  <p>CGST (2.5%): <span className="font-mono text-slate-900">₹{Math.round(selectedBillOrder.total * 0.025)}</span></p>
-                  <div className="border-t border-slate-200 pt-2 mt-2 flex justify-between items-baseline font-bold">
-                    <span className="text-slate-900 text-xs">Total Bill Amount:</span>
-                    <span className="text-slate-950 text-xl font-black font-mono">₹{selectedBillOrder.total}</span>
+                <div className="space-y-1.5 text-[10px] uppercase tracking-wider text-right font-semibold text-[#52633E]">
+                  <p>Subtotal: <span className="font-mono text-[#26301C]">₹{Math.round(selectedBillOrder.total * 0.95)}</span></p>
+                  <p>SGST (2.5%): <span className="font-mono text-[#26301C]">₹{Math.round(selectedBillOrder.total * 0.025)}</span></p>
+                  <p>CGST (2.5%): <span className="font-mono text-[#26301C]">₹{Math.round(selectedBillOrder.total * 0.025)}</span></p>
+                  <div className="border-t border-[#C9A84E]/30 pt-2 mt-2 flex justify-between items-baseline font-bold">
+                    <span className="text-[#26301C] text-xs font-serif">Total Bill Amount:</span>
+                    <span className="text-[#3E4B2F] text-xl font-bold font-mono">₹{selectedBillOrder.total}</span>
                   </div>
                 </div>
 
                 {/* Payment meta details */}
-                <div className="bg-slate-50 border border-slate-100 p-4 rounded-2xl text-[9px] uppercase tracking-widest text-slate-500 space-y-1">
-                  <p><span className="font-bold text-slate-700">Payment Mode:</span> {selectedBillOrder.paymentMethod ? selectedBillOrder.paymentMethod.replace("_", " ") : "CASH"}</p>
-                  {selectedBillOrder.paymentId && <p><span className="font-bold text-slate-700">Txn Ref ID:</span> <span className="font-mono">{selectedBillOrder.paymentId}</span></p>}
+                <div className="bg-[#FAF8F3] border border-[#C9A84E]/20 p-4 rounded-2xl text-[9px] uppercase tracking-widest text-[#52633E] space-y-1">
+                  <p><span className="font-bold text-[#26301C]">Payment Mode:</span> {selectedBillOrder.paymentMethod ? selectedBillOrder.paymentMethod.replace("_", " ") : "CASH"}</p>
+                  {selectedBillOrder.paymentId && <p><span className="font-bold text-[#26301C]">Txn Ref ID:</span> <span className="font-mono">{selectedBillOrder.paymentId}</span></p>}
                 </div>
 
                 {/* Thank You Note */}
                 <div className="text-center space-y-1 pt-4">
-                  <p className="text-[10px] text-slate-600 font-bold uppercase tracking-wider">Thank you for dining with us!</p>
-                  <p className="text-[8px] text-slate-400 uppercase tracking-widest">Powered by SmartMenu - Contactless Dining Solutions</p>
+                  <p className="text-[10px] text-[#26301C] font-bold uppercase tracking-wider font-serif">Thank you for dining with Delish Cafe!</p>
+                  <p className="text-[8px] text-[#52633E] uppercase tracking-widest">Powered by SmartMenu Digital Ordering Platform</p>
                 </div>
               </div>
 
               {/* Action Buttons */}
-              <div className="p-6 border-t border-slate-100 bg-slate-50 flex gap-3 justify-end print:hidden">
+              <div className="p-6 border-t border-[#F4EFE6] bg-[#FAF8F3] flex gap-3 justify-end print:hidden">
                 <button
                   onClick={() => setSelectedBillOrder(null)}
-                  className="bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 px-6 py-3.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer"
+                  className="bg-white hover:bg-[#FAF8F3] text-[#26301C] border border-[#C9A84E]/30 px-6 py-3.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer"
                 >
                   Close
                 </button>
                 <button
                   onClick={handlePrintBill}
-                  className="bg-slate-950 hover:bg-slate-800 text-white px-6 py-3.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer flex items-center gap-2 shadow-md hover:scale-105"
+                  className="bg-[#3E4B2F] hover:bg-[#323E25] text-white px-6 py-3.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer flex items-center gap-2 shadow-md hover:scale-105 border border-[#C9A84E]/30"
                 >
                   <Printer className="w-4 h-4" />
                   Print Bill

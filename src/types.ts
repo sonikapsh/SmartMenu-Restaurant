@@ -29,6 +29,7 @@ export interface Order {
   createdAt: string;
   paymentMethod?: string;
   paymentId?: string;
+  sessionId?: string;
 }
 
 export interface Reservation {
@@ -41,4 +42,5 @@ export interface Reservation {
   phone: string;
   status: "confirmed" | "cancelled";
   createdAt: string;
+  sessionId?: string;
 }

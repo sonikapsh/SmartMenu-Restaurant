@@ -20,8 +20,8 @@ const generateId = () => Math.random().toString(36).substring(2, 9).toUpperCase(
 app.post("/api/payment/create-order", async (req, res) => {
   try {
     const { amount } = req.body; // In INR
-    const keyId = process.env.RAZORPAY_KEY_ID;
-    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+    const keyId = process.env.RAZORPAY_KEY_ID?.trim();
+    const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
 
     if (!amount || isNaN(Number(amount))) {
       return res.status(400).json({ success: false, error: "Invalid amount" });

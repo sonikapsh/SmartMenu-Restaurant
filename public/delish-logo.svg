@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="100%" height="100%">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&amp;display=swap');
+      .serif-d {
+        font-family: 'Playfair Display', 'Times New Roman', Georgia, serif;
+        font-weight: 900;
+      }
+      .serif-text {
+        font-family: 'Playfair Display', 'Times New Roman', Georgia, serif;
+        font-weight: 800;
+        letter-spacing: 2.5px;
+      }
+    </style>
+  </defs>
+
+  <!-- Dark Olive Green Circular Background -->
+  <circle cx="100" cy="100" r="96" fill="#3B482B" stroke="#C9A84E" stroke-width="6" />
+  
+  <!-- Subtle inner hairline gold accent ring -->
+  <circle cx="100" cy="100" r="91" fill="none" stroke="#C9A84E" stroke-width="1" stroke-opacity="0.5" />
+
+  <!-- Prominent White Serif Letter 'D' -->
+  <text 
+    x="98" 
+    y="138" 
+    text-anchor="middle" 
+    fill="#FFFFFF" 
+    font-size="124" 
+    class="serif-d"
+  >D</text>
+
+  <!-- Horizontal 'DELISH' text banner overlay across the waistline -->
+  <rect x="42" y="93" width="116" height="22" fill="#3B482B" rx="2" opacity="0.95" />
+  <text 
+    x="101" 
+    y="109" 
+    text-anchor="middle" 
+    fill="#FFFFFF" 
+    font-size="19" 
+    class="serif-text"
+  >DELISH</text>
+</svg>

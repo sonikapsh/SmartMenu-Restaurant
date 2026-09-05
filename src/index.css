@@ -1,43 +1,97 @@
-@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,600&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "Poppins", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Playfair Display", Georgia, serif;
   
-  /* Primary: Deep Burgundy */
-  --color-amber-700: #7A1F2B;
-  --color-amber-800: #62141F;
-  --color-amber-900: #490A12;
-  --color-amber-950: #300307;
+  /* Primary: Delish Olive Green */
+  --color-olive-50: #F4F6F2;
+  --color-olive-100: #E6ECE0;
+  --color-olive-200: #CBD7C1;
+  --color-olive-300: #ABC09D;
+  --color-olive-400: #88A576;
+  --color-olive-500: #62824F;
+  --color-olive-600: #4D663E;
+  --color-olive-700: #3E4B2F; /* Core Brand Olive */
+  --color-olive-800: #303B24;
+  --color-olive-900: #242D1B;
+  --color-olive-950: #161C10;
+
+  /* Accent: Warm Royal Gold */
+  --color-gold-50: #FDFBF3;
+  --color-gold-100: #FAF5E1;
+  --color-gold-200: #F4E8BF;
+  --color-gold-300: #ECD895;
+  --color-gold-400: #DEC164;
+  --color-gold-500: #C9A84E; /* Core Brand Gold */
+  --color-gold-600: #B38E33;
+  --color-gold-700: #8F6D25;
+  --color-gold-800: #745621;
+  --color-gold-900: #61461E;
+
+  /* Background: Warm Cream & Ivory */
+  --color-cream-50: #FAF8F3;
+  --color-cream-100: #F5F1E8;
+  --color-cream-200: #EDE5D5;
   
-  /* Accent: Warm Gold */
-  --color-amber-500: #C9963B;
-  --color-amber-600: #A87A2B;
-  --color-amber-400: #DBAE5F;
-  --color-amber-300: #ECD193;
-  --color-amber-200: #F6E5BE;
-  --color-amber-100: #FCF4DF;
-  
-  /* Background: Warm Cream */
-  --color-amber-50: #FFF9F0;
-  
-  /* Slate Overrides for Main Text and Dark Elements (Charcoal #252525) */
-  --color-slate-900: #252525;
-  --color-slate-950: #181818;
-  --color-slate-800: #353535;
-  --color-slate-700: #4D4D4D;
-  --color-slate-600: #656565;
-  --color-slate-500: #808080;
-  --color-slate-400: #9E9E9E;
-  --color-slate-300: #C2C2C2;
-  --color-slate-200: #E6E6E6;
-  --color-slate-100: #F3F3F3;
-  --color-slate-50: #FAF9F6;
+  /* Text & Dark Earthy Tones */
+  --color-charcoal-900: #231F1B;
+  --color-charcoal-800: #35302A;
+  --color-charcoal-700: #4B453E;
+  --color-charcoal-600: #686158;
+  --color-charcoal-500: #867E74;
 }
 
-/* Print configuration to handle both QR sheets and bills perfectly */
+/* Custom Delish Utility Classes */
+.font-display {
+  font-family: 'Playfair Display', Georgia, serif;
+}
+
+.gradient-hero {
+  background: linear-gradient(135deg, rgba(62, 75, 47, 0.94) 0%, rgba(36, 31, 25, 0.88) 100%);
+}
+
+.gradient-gold {
+  background: linear-gradient(135deg, #D4AF37 0%, #B88E28 100%);
+}
+
+.gradient-olive {
+  background: linear-gradient(160deg, #4A5B37 0%, #303B24 100%);
+}
+
+.text-gradient-gold {
+  background: linear-gradient(135deg, #D4AF37 0%, #F5DD90 50%, #B88E28 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.glass-light {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.glass-dark {
+  background: rgba(35, 30, 24, 0.82);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.shadow-luxury {
+  box-shadow: 0 25px 50px -12px rgba(35, 30, 24, 0.28);
+}
+
+.shadow-glow {
+  box-shadow: 0 0 35px rgba(201, 168, 78, 0.35);
+}
+
+.shadow-card {
+  box-shadow: 0 10px 30px -10px rgba(35, 30, 24, 0.08);
+}
+
+/* Print configuration to handle both QR sheets and bills */
 @media print {
-  /* Default print for QR sheets (when printing-bill class is not on body) */
   body:not(.printing-bill) header, 
   body:not(.printing-bill) footer, 
   body:not(.printing-bill) section:not(.bg-white) {
@@ -49,7 +103,6 @@
     padding: 0 !important;
   }
 
-  /* Print for Bill/Receipt */
   body.printing-bill * {
     visibility: hidden;
   }
@@ -69,4 +122,3 @@
     font-size: 12px;
   }
 }
-
