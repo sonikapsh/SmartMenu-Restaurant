@@ -32,6 +32,21 @@ service cloud.firestore {
         && data.createdAt is string && data.createdAt.size() <= 100;
     }
 
+    // Session validation helper
+    function isValidSession(data) {
+      return data.sessionId is string && data.sessionId.size() <= 128
+        && data.tableId is string && data.tableId.size() <= 50
+        && data.status is string && (data.status == 'active' || data.status == 'closed')
+        && data.startedAt is string && data.startedAt.size() <= 100;
+    }
+
+    // Table validation helper
+    function isValidTable(data) {
+      return data.tableNumber is string && data.tableNumber.size() <= 50
+        && data.status is string && (data.status == 'available' || data.status == 'occupied')
+        && data.updatedAt is string && data.updatedAt.size() <= 100;
+    }
+
     // 2. Orders Rules
     match /orders/{orderId} {
       allow read: if true;
@@ -45,6 +60,22 @@ service cloud.firestore {
       allow read: if true;
       allow create: if isValidId(reservationId) && isValidReservation(request.resource.data);
       allow update: if isValidId(reservationId) && isValidReservation(request.resource.data);
+      allow delete: if false;
+    }
+
+    // 4. Dining Sessions Rules
+    match /sessions/{sessionId} {
+      allow read: if true;
+      allow create: if isValidId(sessionId) && isValidSession(request.resource.data);
+      allow update: if isValidId(sessionId) && isValidSession(request.resource.data);
+      allow delete: if false;
+    }
+
+    // 5. Tables Rules
+    match /tables/{tableId} {
+      allow read: if true;
+      allow create: if isValidId(tableId) && isValidTable(request.resource.data);
+      allow update: if isValidId(tableId) && isValidTable(request.resource.data);
       allow delete: if false;
     }
   }

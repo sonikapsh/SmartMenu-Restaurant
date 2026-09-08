@@ -27,13 +27,10 @@ import {
   Receipt,
   Menu,
   Crown,
-  Coffee,
-  Shield,
-  Layers,
-  LogOut
+  Coffee
 } from "lucide-react";
 import { menuData } from "./menuData";
-import { MenuItem, CartItem, Order, Reservation, DiningSession, DiningTable, UserRole } from "./types";
+import { MenuItem, CartItem, Order, Reservation } from "./types";
 import { DelishLogo } from "./components/DelishLogo";
 import { initializeApp } from "firebase/app";
 import {
@@ -52,6 +49,7 @@ import firebaseConfig from "../firebase-applet-config.json";
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId);
 
+const OWNER_PASSWORD = "admin123";
 const TOTAL_TABLES = 10;
 
 // Multi-user session isolation helper:
@@ -101,13 +99,6 @@ export default function App() {
   const [adminEmail, setAdminEmail] = useState<string>("");
   const [adminPassword, setAdminPassword] = useState<string>("");
   const [adminLoginError, setAdminLoginError] = useState<string>("");
-  const [authToken, setAuthToken] = useState<string | null>(() => {
-    return typeof window !== "undefined" ? sessionStorage.getItem("delish_auth_token") : null;
-  });
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole | null>(() => {
-    return typeof window !== "undefined" ? (sessionStorage.getItem("delish_user_role") as UserRole) : null;
-  });
-  const [activeAdminTab, setActiveAdminTab] = useState<"kitchen" | "tables" | "reservations" | "qr_codes">("kitchen");
   const [activeCategory, setActiveCategory] = useState<string>("Coffee");
 
   // Hero slideshow state
@@ -121,23 +112,7 @@ export default function App() {
   const [deliveryAddress, setDeliveryAddress] = useState<string>("");
   const [activeTableLabel, setActiveTableLabel] = useState<string>("");
   const [isUrlTable, setIsUrlTable] = useState<boolean>(false);
-  const [isQrLocked, setIsQrLocked] = useState<boolean>(false);
-  const [qrLockedTable, setQrLockedTable] = useState<string>("");
-  const [currentDiningSessionId, setCurrentDiningSessionId] = useState<string>("");
-  const [isSubmittingOrder, setIsSubmittingOrder] = useState<boolean>(false);
   const [tableInputError, setTableInputError] = useState<string>("");
-
-  // Tables and active sessions
-  const [allTables, setAllTables] = useState<DiningTable[]>(() =>
-    Array.from({ length: TOTAL_TABLES }, (_, i) => ({
-      id: String(i + 1),
-      tableNumber: String(i + 1),
-      status: "available",
-      activeSessionId: null,
-      updatedAt: new Date().toISOString()
-    }))
-  );
-  const [activeSessions, setActiveSessions] = useState<DiningSession[]>([]);
 
   // Search & Filters
   const [searchTerm, setSearchTerm] = useState<string>("");
@@ -248,26 +223,8 @@ export default function App() {
         setTableNumber(tStr);
         setActiveTableLabel(tStr);
         setIsUrlTable(true);
-        setIsQrLocked(true);
-        setQrLockedTable(tStr);
         setOrderType("dine_in");
-        sessionStorage.setItem("delish_qr_table_locked", tStr);
         localStorage.setItem(`delish_table_${sid}`, tStr);
-
-        // Fetch or create dining session for this table
-        fetch("/api/sessions/get-or-create", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tableId: tStr })
-        })
-          .then((res) => res.json())
-          .then((data) => {
-            if (data.success && data.sessionId) {
-              setCurrentDiningSessionId(data.sessionId);
-              sessionStorage.setItem("delish_current_session_id", data.sessionId);
-            }
-          })
-          .catch((err) => console.error("Session init error:", err));
 
         // Directly open/scroll to MENU smoothly, bypassing any preference screen
         setTimeout(() => {
@@ -277,120 +234,32 @@ export default function App() {
         }, 250);
       } else {
         localStorage.removeItem(`delish_table_${sid}`);
-        sessionStorage.removeItem("delish_qr_table_locked");
         setTableNumber("");
         setActiveTableLabel("");
-        setIsQrLocked(false);
-        setQrLockedTable("");
         showToast(`Invalid table in link. Delish Cafe has Tables 1 to ${TOTAL_TABLES} only.`);
       }
     } else {
-      // Check if this customer tab was locked to a QR table in this visit
-      const locked = sessionStorage.getItem("delish_qr_table_locked");
-      if (locked) {
-        const parsedLocked = parseInt(locked, 10);
-        if (!isNaN(parsedLocked) && parsedLocked >= 1 && parsedLocked <= TOTAL_TABLES) {
-          const tStr = String(parsedLocked);
-          setIsQrLocked(true);
-          setQrLockedTable(tStr);
-          setTableNumber(tStr);
-          setActiveTableLabel(tStr);
+      // Check if this customer session has a previously selected table
+      const saved = localStorage.getItem(`delish_table_${sid}`);
+      if (saved) {
+        const parsedSaved = parseInt(saved, 10);
+        if (!isNaN(parsedSaved) && parsedSaved >= 1 && parsedSaved <= TOTAL_TABLES) {
+          setTableNumber(String(parsedSaved));
+          setActiveTableLabel(String(parsedSaved));
           setOrderType("dine_in");
-          const savedSess = sessionStorage.getItem("delish_current_session_id");
-          if (savedSess) setCurrentDiningSessionId(savedSess);
-        }
-      } else {
-        // Normal non-QR walk-in customer
-        const saved = localStorage.getItem(`delish_table_${sid}`);
-        if (saved) {
-          const parsedSaved = parseInt(saved, 10);
-          if (!isNaN(parsedSaved) && parsedSaved >= 1 && parsedSaved <= TOTAL_TABLES) {
-            setTableNumber(String(parsedSaved));
-            setActiveTableLabel(String(parsedSaved));
-            setOrderType("dine_in");
-          } else {
-            localStorage.removeItem(`delish_table_${sid}`);
-            setTableNumber("");
-            setActiveTableLabel("");
-          }
+        } else {
+          localStorage.removeItem(`delish_table_${sid}`);
+          setTableNumber("");
+          setActiveTableLabel("");
         }
       }
     }
-
-    // Verify stored admin auth token on mount
-    const storedToken = sessionStorage.getItem("delish_auth_token");
-    if (storedToken) {
-      fetch("/api/admin/verify-session", {
-        headers: { Authorization: `Bearer ${storedToken}` }
-      })
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.success && data.user) {
-            setCurrentUserRole(data.user.role);
-            setAuthToken(storedToken);
-          } else {
-            sessionStorage.removeItem("delish_auth_token");
-            sessionStorage.removeItem("delish_user_role");
-            setAuthToken(null);
-            setCurrentUserRole(null);
-          }
-        })
-        .catch(() => {});
-    }
-
-    // Fetch initial active sessions & tables from backend
-    fetch("/api/sessions/active")
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.success) {
-          if (Array.isArray(data.tables) && data.tables.length > 0) setAllTables(data.tables);
-          if (Array.isArray(data.activeSessions)) setActiveSessions(data.activeSessions);
-        }
-      })
-      .catch(() => {});
   }, []);
 
-  // Real-time Firestore sync with multi-user session isolation and live tables/sessions
+  // Real-time Firestore sync with strict multi-user session isolation
   useEffect(() => {
     let unsubscribeOrders: () => void = () => {};
     let unsubscribeReservations: () => void = () => {};
-    let unsubscribeTables: () => void = () => {};
-    let unsubscribeSessions: () => void = () => {};
-
-    // Live table statuses
-    try {
-      unsubscribeTables = onSnapshot(
-        collection(db, "tables"),
-        (snapshot) => {
-          const tbls: DiningTable[] = [];
-          snapshot.forEach((docSnap) => {
-            tbls.push({ id: docSnap.id, ...docSnap.data() } as DiningTable);
-          });
-          tbls.sort((a, b) => parseInt(a.tableNumber, 10) - parseInt(b.tableNumber, 10));
-          if (tbls.length > 0) setAllTables(tbls);
-        },
-        (err) => console.warn("Firestore tables sync notice:", err)
-      );
-    } catch (e) {
-      console.warn("Firestore tables init:", e);
-    }
-
-    // Live sessions
-    try {
-      unsubscribeSessions = onSnapshot(
-        collection(db, "sessions"),
-        (snapshot) => {
-          const sList: DiningSession[] = [];
-          snapshot.forEach((docSnap) => {
-            sList.push({ id: docSnap.id, ...docSnap.data() } as DiningSession);
-          });
-          setActiveSessions(sList);
-        },
-        (err) => console.warn("Firestore sessions sync notice:", err)
-      );
-    } catch (e) {
-      console.warn("Firestore sessions init:", e);
-    }
 
     if (isAdminMode) {
       // In Admin Mode: Staff/Kitchen needs to see all cafe orders & reservations
@@ -426,56 +295,48 @@ export default function App() {
         }
       );
     } else {
-      // In Customer Mode: Multi-user session isolation.
-      // Customer listens to orders matching either their unique session or current table dining session
-      const qOrders = collection(db, "orders");
-      unsubscribeOrders = onSnapshot(
-        qOrders,
-        (snapshot) => {
-          const orders: Order[] = [];
-          snapshot.forEach((docSnap) => {
-            const data = docSnap.data();
-            // Match customerSessionId, currentDiningSessionId, or userOrderIds
-            if (
-              data.sessionId === customerSessionId ||
-              (currentDiningSessionId && data.sessionId === currentDiningSessionId) ||
-              userOrderIds.includes(docSnap.id)
-            ) {
-              orders.push({ id: docSnap.id, ...data } as Order);
-            }
-          });
-          orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          setAllOrders(orders);
-        },
-        (error) => {
-          console.error("Firestore customer orders sync error:", error);
-        }
-      );
+      // In Customer Mode: Strict multi-user session isolation.
+      // Customer ONLY listens to orders matching their unique session identifier.
+      if (customerSessionId) {
+        const qOrders = query(collection(db, "orders"), where("sessionId", "==", customerSessionId));
+        unsubscribeOrders = onSnapshot(
+          qOrders,
+          (snapshot) => {
+            const orders: Order[] = [];
+            snapshot.forEach((docSnap) => {
+              orders.push({ id: docSnap.id, ...docSnap.data() } as Order);
+            });
+            orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            setAllOrders(orders);
+          },
+          (error) => {
+            console.error("Firestore customer orders sync error:", error);
+          }
+        );
 
-      const qReservations = collection(db, "reservations");
-      unsubscribeReservations = onSnapshot(
-        qReservations,
-        (snapshot) => {
-          const reservations: Reservation[] = [];
-          snapshot.forEach((docSnap) => {
-            reservations.push({ id: docSnap.id, ...docSnap.data() } as Reservation);
-          });
-          reservations.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          setAllReservations(reservations);
-        },
-        (error) => {
-          console.error("Firestore reservations sync error:", error);
-        }
-      );
+        const qReservations = collection(db, "reservations");
+        unsubscribeReservations = onSnapshot(
+          qReservations,
+          (snapshot) => {
+            const reservations: Reservation[] = [];
+            snapshot.forEach((docSnap) => {
+              reservations.push({ id: docSnap.id, ...docSnap.data() } as Reservation);
+            });
+            reservations.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            setAllReservations(reservations);
+          },
+          (error) => {
+            console.error("Firestore reservations sync error:", error);
+          }
+        );
+      }
     }
 
     return () => {
       unsubscribeOrders();
       unsubscribeReservations();
-      unsubscribeTables();
-      unsubscribeSessions();
     };
-  }, [isAdminMode, customerSessionId, currentDiningSessionId, userOrderIds]);
+  }, [isAdminMode, customerSessionId]);
 
   // Update order status if tracked order gets updated in list
   useEffect(() => {
@@ -546,10 +407,6 @@ export default function App() {
 
   // Set table number with strict validation (Tables 1 to 10 only) and session persistence
   const handleSetTable = (targetTable?: string) => {
-    if (isQrLocked) {
-      showToast(`Table ${qrLockedTable} is locked via your table QR code.`);
-      return;
-    }
     const raw = typeof targetTable === "string" ? targetTable : tableNumber;
     const trimmed = raw.trim();
     if (!trimmed) {
@@ -572,10 +429,6 @@ export default function App() {
   };
 
   const handleClearTable = () => {
-    if (isQrLocked) {
-      showToast(`Table ${qrLockedTable} is locked via your table QR code.`);
-      return;
-    }
     setTableNumber("");
     setActiveTableLabel("");
     setTableInputError("");
@@ -668,56 +521,34 @@ export default function App() {
   };
 
   const submitOrderToBackend = async (payMethod: string, payId: string) => {
-    if (isSubmittingOrder) return;
-    setIsSubmittingOrder(true);
-
-    const idempotencyKey = "req_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
-    const targetTable = isQrLocked ? qrLockedTable : activeTableLabel;
-    const targetOrderType = isQrLocked ? "dine_in" : orderType;
-
-    const orderPayload = {
-      idempotencyKey,
-      tableNumber: targetOrderType === "dine_in" ? targetTable : "Delivery",
-      orderType: targetOrderType,
-      deliveryAddress: targetOrderType === "delivery" ? deliveryAddress : "",
+    const orderId = "ORD-" + Math.random().toString(36).substring(2, 9).toUpperCase();
+    const newOrder: Order = {
+      id: orderId,
+      tableNumber: orderType === "dine_in" ? activeTableLabel : "Delivery",
+      orderType,
+      deliveryAddress: orderType === "delivery" ? deliveryAddress : "",
       items: cart,
       total: cartTotal,
+      status: "Received" as const,
+      createdAt: new Date().toLocaleString("en-US", { hour12: true }),
       paymentMethod: payMethod,
       paymentId: payId,
-      sessionId: currentDiningSessionId || customerSessionId,
-      isQrOrder: isQrLocked,
-      qrTable: qrLockedTable
+      sessionId: customerSessionId
     };
 
     try {
-      const response = await fetch("/api/orders/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(orderPayload)
-      });
-
-      const data = await response.json();
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || "Order creation failed");
-      }
-
-      const createdOrder: Order = data.order;
-      if (data.sessionId) {
-        setCurrentDiningSessionId(data.sessionId);
-        sessionStorage.setItem("delish_current_session_id", data.sessionId);
-      }
-
-      setCurrentOrder(createdOrder);
+      await setDoc(doc(db, "orders", orderId), newOrder);
+      setCurrentOrder(newOrder);
       setUserOrderIds((prev) => {
-        const updated = [...prev, createdOrder.id];
+        const updated = [...prev, orderId];
         localStorage.setItem(`delish_orders_${customerSessionId}`, JSON.stringify(updated));
         return updated;
       });
       setCart([]);
       localStorage.removeItem(`delish_cart_${customerSessionId}`);
       setShowPaymentModal(false);
-      showToast(data.duplicated ? "Order already verified!" : "Order placed successfully!");
-
+      showToast("Order placed successfully!");
+      
       // Scroll to active tracking
       setTimeout(() => {
         if (menuRef.current) {
@@ -725,38 +556,8 @@ export default function App() {
         }
       }, 400);
     } catch (e: any) {
-      console.warn("Backend order API fallback notice:", e);
-      try {
-        const fallbackId = "ORD-" + Math.random().toString(36).substring(2, 9).toUpperCase();
-        const fallbackOrder: Order = {
-          id: fallbackId,
-          tableNumber: targetOrderType === "dine_in" ? targetTable : "Delivery",
-          orderType: targetOrderType,
-          deliveryAddress: targetOrderType === "delivery" ? deliveryAddress : "",
-          items: cart,
-          total: cartTotal,
-          status: "Received" as const,
-          createdAt: new Date().toLocaleString("en-US", { hour12: true }),
-          paymentMethod: payMethod,
-          paymentId: payId,
-          sessionId: currentDiningSessionId || customerSessionId
-        };
-        await setDoc(doc(db, "orders", fallbackId), fallbackOrder);
-        setCurrentOrder(fallbackOrder);
-        setUserOrderIds((prev) => {
-          const updated = [...prev, fallbackId];
-          localStorage.setItem(`delish_orders_${customerSessionId}`, JSON.stringify(updated));
-          return updated;
-        });
-        setCart([]);
-        localStorage.removeItem(`delish_cart_${customerSessionId}`);
-        setShowPaymentModal(false);
-        showToast("Order placed successfully!");
-      } catch (err: any) {
-        showToast("Error placing order: " + err.message);
-      }
-    } finally {
-      setIsSubmittingOrder(false);
+      console.error("Firestore order write failed:", e);
+      showToast("Error placing order: " + e.message);
     }
   };
 
@@ -796,33 +597,11 @@ export default function App() {
         amount: orderData.amount,
         currency: "INR",
         name: "Delish Cafe",
-        description: `Delish Cafe Order - ${orderType === "dine_in" ? "Table " + (isQrLocked ? qrLockedTable : activeTableLabel) : "Doorstep Delivery"}`,
+        description: `Delish Cafe Order - ${orderType === "dine_in" ? "Table " + activeTableLabel : "Doorstep Delivery"}`,
         order_id: orderData.simulated ? undefined : orderData.order_id,
         handler: async function (paymentResponse: any) {
           const payId = paymentResponse.razorpay_payment_id || "PAY_SIM_" + Math.random().toString(36).substring(2, 9).toUpperCase();
-          showToast("Authorizing payment verification...");
-
-          try {
-            const verifyRes = await fetch("/api/payment/verify", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                razorpay_order_id: paymentResponse.razorpay_order_id,
-                razorpay_payment_id: payId,
-                razorpay_signature: paymentResponse.razorpay_signature,
-                sessionId: currentDiningSessionId,
-                tableNumber: isQrLocked ? qrLockedTable : activeTableLabel,
-                closeSessionAfterPay: false
-              })
-            });
-            const verifyData = await verifyRes.json();
-            if (verifyRes.ok && verifyData.success) {
-              showToast("Payment verified cryptographically!");
-            }
-          } catch (vErr) {
-            console.warn("Payment verification notice:", vErr);
-          }
-
+          showToast("Payment Authorized successfully!");
           await submitOrderToBackend(`Razorpay (${selectedPaymentMethod.toUpperCase()})`, payId);
         },
         prefill: {
@@ -948,83 +727,42 @@ export default function App() {
     }
   };
 
-  // RBAC Admin login
+  // Owner Admin login
   const handleAdminLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanUser = adminEmail.trim().toLowerCase();
-    const cleanPass = adminPassword.trim();
-
     try {
       const response = await fetch("/api/admin/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: cleanUser, password: cleanPass })
+        body: JSON.stringify({ email: adminEmail, password: adminPassword })
       });
       const data = await response.json();
       if (response.ok && data.success) {
         setIsAdminMode(true);
-        setCurrentUserRole(data.role);
-        setAuthToken(data.token);
-        sessionStorage.setItem("delish_auth_token", data.token);
-        sessionStorage.setItem("delish_user_role", data.role);
         setShowAdminLogin(false);
         setAdminEmail("");
         setAdminPassword("");
         setAdminLoginError("");
-        if (data.role === "KITCHEN") {
-          setActiveAdminTab("kitchen");
-        }
-        showToast(`Signed in as ${data.role}.`);
+        showToast("Logged in as Owner.");
       } else {
-        setAdminLoginError(data.error || "Invalid Username or Password.");
+        setAdminLoginError(data.error || "Invalid Email or Password.");
       }
     } catch (err) {
-      setAdminLoginError("Could not reach authentication server.");
-    }
-  };
-
-  const handleAdminLogout = () => {
-    setAuthToken(null);
-    setCurrentUserRole(null);
-    sessionStorage.removeItem("delish_auth_token");
-    sessionStorage.removeItem("delish_user_role");
-    setIsAdminMode(false);
-    showToast("Signed out of Portal.");
-  };
-
-  const handleCloseTableSession = async (tableId: string, sessId?: string | null) => {
-    if (!window.confirm(`Are you sure you want to close the dining session for Table ${tableId} and make it available?`)) {
-      return;
-    }
-    try {
-      const response = await fetch("/api/admin/sessions/close", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${authToken || ""}`
-        },
-        body: JSON.stringify({ tableId, sessionId: sessId })
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
-        showToast(`Table ${tableId} session closed. Table is now Available!`);
-        // Immediate local state update
-        setAllTables((prev) =>
-          prev.map((t) =>
-            t.tableNumber === tableId
-              ? { ...t, status: "available", activeSessionId: null, updatedAt: new Date().toISOString() }
-              : t
-          )
-        );
+      // Fallback for preview safety if backend is starting up
+      if (adminPassword === OWNER_PASSWORD) {
+        setIsAdminMode(true);
+        setShowAdminLogin(false);
+        setAdminEmail("");
+        setAdminPassword("");
+        setAdminLoginError("");
+        showToast("Logged in as Owner (Offline).");
       } else {
-        showToast(data.error || "Failed to close table session.");
+        setAdminLoginError("Unable to reach backend servers.");
       }
-    } catch (e: any) {
-      showToast("Error closing session: " + e.message);
     }
   };
 
-  // Admin & Kitchen order status advancement
+  // Owner admin actions
   const advanceOrderStatus = async (orderId: string, currentStatus: string) => {
     const statusFlow = ["Received", "Preparing", "Ready", "Completed"];
     const currIdx = statusFlow.indexOf(currentStatus);
@@ -1032,21 +770,11 @@ export default function App() {
     const nextStatus = statusFlow[currIdx + 1];
 
     try {
-      if (authToken) {
-        await fetch("/api/admin/orders/update-status", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${authToken}`
-          },
-          body: JSON.stringify({ orderId, status: nextStatus })
-        });
-      }
       await updateDoc(doc(db, "orders", orderId), { status: nextStatus });
       showToast(`Order updated to ${nextStatus}`);
     } catch (e: any) {
-      console.error("Advance status notice:", e);
-      showToast(`Order updated to ${nextStatus}`);
+      console.error("Firestore advance status failed:", e);
+      showToast("Error updating order.");
     }
   };
 
@@ -1140,72 +868,51 @@ export default function App() {
               </button>
             </nav>
           ) : (
-            <div className="flex items-center gap-2 text-[10px] uppercase border border-[#C9A84E]/40 text-[#3E4B2F] bg-[#C9A84E]/15 font-bold px-3.5 py-1.5 rounded-full tracking-wider">
+            <div className="text-[10px] uppercase border border-[#C9A84E]/40 text-[#3E4B2F] bg-[#C9A84E]/10 font-bold px-3.5 py-1.5 rounded-full tracking-wider flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-[#3E4B2F] animate-pulse"></span>
-              <span>
-                {currentUserRole === "OWNER"
-                  ? "👑 Owner Portal"
-                  : currentUserRole === "KITCHEN"
-                  ? "🍳 Kitchen Dispatch"
-                  : currentUserRole === "STAFF"
-                  ? "📋 Floor Staff"
-                  : currentUserRole === "MANAGER"
-                  ? "👔 Manager Portal"
-                  : "Portal Active"}
-              </span>
+              Owner Dashboard Active
             </div>
           )}
 
           <div className="flex items-center gap-2 sm:gap-3">
             {isAdminMode ? (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => setIsAdminMode(false)}
-                  className="bg-white hover:bg-[#F4EFE6] text-[#3E4B2F] border border-[#C9A84E]/40 px-3.5 py-2 rounded-xl font-bold uppercase tracking-widest text-[10px] transition-all flex items-center gap-1.5 shadow-sm cursor-pointer"
-                  title="Switch to Customer view without signing out"
-                >
-                  <ArrowLeft className="w-3.5 h-3.5" />
-                  Customer
-                </button>
-                <button
-                  onClick={handleAdminLogout}
-                  className="bg-[#3E4B2F] hover:bg-rose-900 text-white px-3.5 py-2 rounded-xl font-bold uppercase tracking-widest text-[10px] transition-all flex items-center gap-1.5 shadow-sm cursor-pointer border border-[#C9A84E]/40"
-                  title="Sign out of portal"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  Sign Out
-                </button>
-              </div>
+              <button
+                onClick={() => setIsAdminMode(false)}
+                className="bg-[#3E4B2F] hover:bg-[#323E25] text-white px-4.5 py-2.5 rounded-xl font-bold uppercase tracking-widest text-[10px] transition-all flex items-center gap-2 shadow-sm"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                Customer View
+              </button>
             ) : (
               <button
                 onClick={() => setShowAdminLogin(true)}
-                className="flex items-center justify-center w-9 sm:w-10 h-9 sm:h-10 rounded-xl bg-gradient-to-br from-[#FAF8F3] to-[#F4EFE6] hover:from-[#F4EFE6] hover:to-[#ECE4D4] text-[#C9A84E] border border-[#C9A84E]/30 shadow-sm transition-all duration-300 hover:scale-105 active:scale-95 cursor-pointer"
+                className="hidden sm:flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-br from-[#FAF8F3] to-[#F4EFE6] hover:from-[#F4EFE6] hover:to-[#ECE4D4] text-[#C9A84E] border border-[#C9A84E]/30 shadow-sm transition-all duration-300 hover:scale-105 active:scale-95 cursor-pointer"
                 title="Cafe Owner Portal"
               >
-                <Crown className="w-4 sm:w-4.5 h-4 sm:h-4.5 text-[#C9A84E]" />
+                <Crown className="w-4.5 h-4.5 text-[#C9A84E]" />
               </button>
             )}
 
             {!isAdminMode && (
               <button
                 onClick={() => setIsCartOpen(true)}
-                className="relative bg-[#3E4B2F] text-white px-3 sm:px-6 py-2 sm:py-2.5 rounded-full flex items-center gap-2 hover:bg-[#323E25] transition-all font-bold text-[11px] tracking-wider uppercase cursor-pointer shadow-lg shadow-[#3E4B2F]/20 border border-[#C9A84E]/30"
+                className="relative bg-[#3E4B2F] text-white px-4 sm:px-6 py-2.5 sm:py-3 rounded-full flex items-center gap-2 hover:bg-[#323E25] transition-all font-bold text-[11px] tracking-wider uppercase cursor-pointer shadow-lg shadow-[#3E4B2F]/20 border border-[#C9A84E]/30"
               >
                 <ShoppingCart className="w-3.5 h-3.5 text-[#FAF8F3]" />
                 <span className="font-bold text-[11px] sm:inline hidden">Tray</span>
                 {cartItemCount > 0 && (
-                  <span className="min-w-[1.25rem] h-5 px-1 bg-[#C9A84E] text-[#26301C] text-[9px] font-black rounded-full flex items-center justify-center border-2 border-[#FAF8F3] shadow-sm">
+                  <span className="absolute -top-1 -right-1 w-5.5 h-5.5 bg-[#C9A84E] text-[#26301C] text-[9px] font-black rounded-full flex items-center justify-center border-2 border-[#FAF8F3] shadow-sm">
                     {cartItemCount}
                   </span>
                 )}
               </button>
             )}
 
-            {/* Menu toggle hamburger button */}
+            {/* Mobile menu toggle hamburger button */}
             {!isAdminMode && (
               <button
                 onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-                className="w-9 sm:w-10 h-9 sm:h-10 rounded-xl bg-white hover:bg-[#F4EFE6] text-[#3E4B2F] hover:text-[#C9A84E] flex items-center justify-center transition-all border border-[#C9A84E]/20 shadow-sm cursor-pointer"
+                className="lg:hidden w-10 h-10 rounded-xl bg-white hover:bg-[#F4EFE6] text-[#3E4B2F] hover:text-[#C9A84E] flex items-center justify-center transition-all border border-[#C9A84E]/20 shadow-sm"
                 title="Toggle Menu"
               >
                 {isMobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
@@ -1214,14 +921,14 @@ export default function App() {
           </div>
         </div>
 
-        {/* Dropdown Menu Panel */}
+        {/* Mobile Dropdown Menu Panel */}
         <AnimatePresence>
           {isMobileMenuOpen && !isAdminMode && (
             <motion.div
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: "auto" }}
               exit={{ opacity: 0, height: 0 }}
-              className="border-t border-[#C9A84E]/20 bg-[#FAF8F3] shadow-lg overflow-hidden"
+              className="lg:hidden border-t border-[#C9A84E]/20 bg-[#FAF8F3] shadow-lg overflow-hidden"
             >
               <div className="px-6 py-5 space-y-3.5 flex flex-col font-bold uppercase tracking-widest text-[10px] text-[#52633E]">
                 <button
@@ -1321,10 +1028,10 @@ export default function App() {
 
               <form onSubmit={handleAdminLoginSubmit} className="space-y-4">
                 <div>
-                  <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest mb-2">Admin Username or Email</label>
+                  <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest mb-2">Admin Email</label>
                   <input
-                    type="text"
-                    placeholder="admin@gmail.com or admin"
+                    type="email"
+                    placeholder="Enter email address"
                     value={adminEmail}
                     onChange={(e) => setAdminEmail(e.target.value)}
                     className="w-full px-4 py-3.5 border border-[#C9A84E]/30 rounded-xl focus:outline-none focus:border-[#3E4B2F] font-bold text-xs transition-all bg-white text-[#26301C] placeholder-stone-400"
@@ -1333,63 +1040,16 @@ export default function App() {
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest mb-2">Owner Secret Password</label>
+                  <label className="block text-[10px] font-bold text-[#52633E] uppercase tracking-widest mb-2">Secret Password</label>
                   <input
                     type="password"
-                    placeholder="Enter password (admin123)"
+                    placeholder="Enter secret password"
                     value={adminPassword}
                     onChange={(e) => setAdminPassword(e.target.value)}
                     className="w-full px-4 py-3.5 border border-[#C9A84E]/30 rounded-xl focus:outline-none focus:border-[#3E4B2F] font-bold tracking-widest text-xs uppercase transition-all bg-white text-[#26301C] placeholder-stone-400"
                     required
                   />
                 </div>
-
-                <div className="p-3.5 bg-[#FAF8F3] border border-[#C9A84E]/30 rounded-xl space-y-2">
-                  <span className="text-[#C9A84E] block uppercase tracking-wider text-[9px] font-bold">Quick Role Login Presets:</span>
-                  <div className="grid grid-cols-2 gap-2 text-[10px]">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminEmail("admin@gmail.com");
-                        setAdminPassword("admin123");
-                      }}
-                      className="px-2 py-1.5 bg-white border border-[#C9A84E]/40 text-[#3E4B2F] rounded-lg hover:bg-[#F4EFE6] transition-all text-left font-bold"
-                    >
-                      👑 Owner <span className="block text-[8px] font-normal text-[#52633E]">admin@gmail.com</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminEmail("kitchen");
-                        setAdminPassword("kitchen123");
-                      }}
-                      className="px-2 py-1.5 bg-white border border-[#C9A84E]/40 text-[#3E4B2F] rounded-lg hover:bg-[#F4EFE6] transition-all text-left font-bold"
-                    >
-                      🍳 Kitchen <span className="block text-[8px] font-normal text-[#52633E]">kitchen / kitchen123</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminEmail("staff");
-                        setAdminPassword("staff123");
-                      }}
-                      className="px-2 py-1.5 bg-white border border-[#C9A84E]/40 text-[#3E4B2F] rounded-lg hover:bg-[#F4EFE6] transition-all text-left font-bold"
-                    >
-                      📋 Floor Staff <span className="block text-[8px] font-normal text-[#52633E]">staff / staff123</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminEmail("manager");
-                        setAdminPassword("manager123");
-                      }}
-                      className="px-2 py-1.5 bg-white border border-[#C9A84E]/40 text-[#3E4B2F] rounded-lg hover:bg-[#F4EFE6] transition-all text-left font-bold"
-                    >
-                      👔 Manager <span className="block text-[8px] font-normal text-[#52633E]">manager / manager123</span>
-                    </button>
-                  </div>
-                </div>
-
                 {adminLoginError && (
                   <div className="p-3 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl text-xs flex items-center gap-2 font-bold uppercase tracking-wider">
                     <AlertCircle className="w-4 h-4 shrink-0" />
@@ -1409,12 +1069,12 @@ export default function App() {
       </AnimatePresence>
 
       {/* ================= PRIMARY VIEWS ================= */}
-      <div className="pt-16 sm:pt-20">
+      <div className="pt-20">
         {!isAdminMode ? (
         // ================= CUSTOMER PORTAL =================
         <>
           {/* ================= HERO SECTION ================= */}
-          <section className="relative min-h-[calc(100svh-4rem)] sm:min-h-[calc(100svh-5rem)] flex flex-col justify-between items-center py-4 sm:py-6 px-4 overflow-hidden bg-[#FAF8F3]">
+          <section className="relative min-h-[92vh] flex items-center justify-center py-20 px-4 overflow-hidden bg-[#FAF8F3]">
             {/* Background Slideshow */}
             <div className="absolute inset-0 z-0">
               {HERO_IMAGES.map((img, i) => (
@@ -1429,31 +1089,31 @@ export default function App() {
               <div className="absolute inset-0 bg-gradient-to-t from-[#FAF8F3] via-[#FAF8F3]/85 to-transparent" />
             </div>
 
-            <div className="relative z-10 w-full max-w-4xl mx-auto my-auto text-center text-[#26301C] px-2">
+            <div className="relative z-10 max-w-4xl mx-auto text-center text-[#26301C]">
               <motion.div
-                initial={{ opacity: 0, y: 15 }}
+                initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.6 }}
-                className="space-y-3 sm:space-y-4 lg:space-y-5"
+                transition={{ duration: 0.8 }}
+                className="space-y-6"
               >
-                <div className="inline-flex items-center gap-1.5 sm:gap-2 bg-[#FAF8F3]/95 border border-[#C9A84E]/60 px-3.5 py-1.5 sm:px-4 sm:py-2 rounded-full text-[9px] sm:text-[11px] font-bold tracking-widest uppercase text-[#3E4B2F] shadow-sm backdrop-blur-sm">
-                  <Star className="w-3 h-3 sm:w-3.5 sm:h-3.5 fill-[#C9A84E] text-[#C9A84E]" />
+                <div className="inline-flex items-center gap-2 bg-[#FAF8F3]/90 border border-[#C9A84E]/50 px-4 py-2 rounded-full text-xs font-bold tracking-widest uppercase text-[#3E4B2F] shadow-sm backdrop-blur-sm">
+                  <Star className="w-3.5 h-3.5 fill-[#C9A84E] text-[#C9A84E]" />
                   <span>Ahmedabad's Premier Aesthetic Cafe &bull; Est. 2024</span>
                 </div>
-                <h1 className="text-3xl sm:text-5xl md:text-6xl lg:text-7xl font-serif font-black tracking-tight leading-[1.08] sm:leading-[1.12] text-[#26301C]">
+                <h1 className="text-5xl sm:text-7xl lg:text-8xl font-serif font-black tracking-tight leading-tight text-[#26301C]">
                   Where Taste Meets <br />
                   <span className="text-[#C9A84E] italic font-serif">
                     Aesthetic
                   </span>
                 </h1>
-                <p className="text-[10px] sm:text-xs md:text-sm text-[#52633E] max-w-2xl mx-auto leading-relaxed uppercase tracking-wider font-semibold px-2">
+                <p className="text-xs sm:text-sm text-[#52633E] max-w-2xl mx-auto leading-relaxed uppercase tracking-wider font-semibold">
                   Welcome to Delish Cafe. Scan your table QR or order for express doorstep delivery. Immerse in our olive-green sanctuary with handcrafted coffees, artisanal shakes, sourdough pizzas, and gourmet bites.
                 </p>
 
-                <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5 sm:gap-4 pt-1 sm:pt-2 w-full max-w-xs sm:max-w-none mx-auto">
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
                   <button
                     onClick={() => handleScrollTo(menuRef)}
-                    className="w-full sm:w-auto bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-[11px] sm:text-xs py-3.5 sm:py-4 px-7 sm:px-9 rounded-xl transition-all cursor-pointer shadow-lg shadow-[#3E4B2F]/20 border border-[#C9A84E]/30 text-center"
+                    className="w-full sm:w-auto bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-xs py-4.5 px-10 rounded-xl transition-all cursor-pointer shadow-lg shadow-[#3E4B2F]/20 border border-[#C9A84E]/30"
                   >
                     Explore Menu & Order
                   </button>
@@ -1463,25 +1123,25 @@ export default function App() {
                       setActiveReservationTab("book");
                       setIsReservationModalOpen(true);
                     }}
-                    className="w-full sm:w-auto bg-white hover:bg-[#F4EFE6] text-[#3E4B2F] font-bold uppercase tracking-widest text-[11px] sm:text-xs py-3.5 sm:py-4 px-7 sm:px-9 rounded-xl border border-[#C9A84E]/40 transition-all cursor-pointer shadow-sm text-center"
+                    className="w-full sm:w-auto bg-white hover:bg-[#F4EFE6] text-[#3E4B2F] font-bold uppercase tracking-widest text-xs py-4.5 px-8 rounded-xl border border-[#C9A84E]/40 transition-all cursor-pointer shadow-sm"
                   >
                     Reserve Table
                   </button>
                 </div>
               </motion.div>
-            </div>
 
-            {/* Dots tracker at bottom of hero */}
-            <div className="relative z-10 flex justify-center gap-1.5 sm:gap-2 pt-2 sm:pt-3 pb-1">
-              {HERO_IMAGES.map((_, i) => (
-                <button
-                  key={i}
-                  onClick={() => setHeroIndex(i)}
-                  className={`h-2 sm:h-2.5 rounded-full transition-all ${
-                    i === heroIndex ? "bg-[#3E4B2F] w-7 sm:w-8" : "bg-[#C9A84E]/40 hover:bg-[#C9A84E]/70 w-2 sm:w-2.5"
-                  }`}
-                />
-              ))}
+              {/* Dots tracker */}
+              <div className="flex justify-center gap-2 mt-16">
+                {HERO_IMAGES.map((_, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setHeroIndex(i)}
+                    className={`h-2.5 rounded-full transition-all ${
+                      i === heroIndex ? "bg-[#3E4B2F] w-8" : "bg-[#C9A84E]/30 hover:bg-[#C9A84E]/60 w-2.5"
+                    }`}
+                  />
+                ))}
+              </div>
             </div>
           </section>
 
@@ -2492,489 +2152,225 @@ export default function App() {
             </div>
           </div>
 
-          {/* Admin Navigation Tabs */}
-          <div className="flex flex-wrap items-center gap-2.5 border-b border-[#C9A84E]/30 pb-4">
-            <button
-              onClick={() => setActiveAdminTab("kitchen")}
-              className={`px-5 py-2.5 rounded-xl font-bold uppercase tracking-wider text-xs transition-all flex items-center gap-2 cursor-pointer ${
-                activeAdminTab === "kitchen"
-                  ? "bg-[#3E4B2F] text-white shadow-md border border-[#C9A84E]/40"
-                  : "bg-white text-[#52633E] border border-[#C9A84E]/25 hover:bg-[#F4EFE6]"
-              }`}
-            >
-              <TrendingUp className="w-4 h-4 text-[#C9A84E]" />
-              Kitchen Pipeline ({pendingOrdersCount})
-            </button>
-            <button
-              onClick={() => setActiveAdminTab("tables")}
-              className={`px-5 py-2.5 rounded-xl font-bold uppercase tracking-wider text-xs transition-all flex items-center gap-2 cursor-pointer ${
-                activeAdminTab === "tables"
-                  ? "bg-[#3E4B2F] text-white shadow-md border border-[#C9A84E]/40"
-                  : "bg-white text-[#52633E] border border-[#C9A84E]/25 hover:bg-[#F4EFE6]"
-              }`}
-            >
-              <Users className="w-4 h-4 text-[#C9A84E]" />
-              Dining Tables & Sessions ({allTables.filter((t) => t.status === "occupied").length} Occupied)
-            </button>
-            <button
-              onClick={() => setActiveAdminTab("reservations")}
-              className={`px-5 py-2.5 rounded-xl font-bold uppercase tracking-wider text-xs transition-all flex items-center gap-2 cursor-pointer ${
-                activeAdminTab === "reservations"
-                  ? "bg-[#3E4B2F] text-white shadow-md border border-[#C9A84E]/40"
-                  : "bg-white text-[#52633E] border border-[#C9A84E]/25 hover:bg-[#F4EFE6]"
-              }`}
-            >
-              <Clock className="w-4 h-4 text-[#C9A84E]" />
-              Reservations ({activeReservationsCount})
-            </button>
-            <button
-              onClick={() => setActiveAdminTab("qr_codes")}
-              className={`px-5 py-2.5 rounded-xl font-bold uppercase tracking-wider text-xs transition-all flex items-center gap-2 cursor-pointer ${
-                activeAdminTab === "qr_codes"
-                  ? "bg-[#3E4B2F] text-white shadow-md border border-[#C9A84E]/40"
-                  : "bg-white text-[#52633E] border border-[#C9A84E]/25 hover:bg-[#F4EFE6]"
-              }`}
-            >
-              <QrCode className="w-4 h-4 text-[#C9A84E]" />
-              QR Code Sheets
-            </button>
-          </div>
-
-          {/* TAB 1: KITCHEN PIPELINE */}
-          {activeAdminTab === "kitchen" && (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
-              {/* Live orders log (Col-span 8) */}
-              <div className="lg:col-span-8 bg-white border border-[#C9A84E]/25 rounded-3xl p-6 sm:p-8 shadow-md shadow-[#3E4B2F]/5 space-y-6">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#F4EFE6] pb-5">
-                  <div>
-                    <h3 className="text-xl font-serif font-bold uppercase tracking-wider text-[#26301C] flex items-center gap-2">
-                      <TrendingUp className="w-5 h-5 text-[#C9A84E]" />
-                      Delish Kitchen Pipeline
-                    </h3>
-                    <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">Live cafe customer orders mapped in real time. Advance dish stages as chefs prepare.</p>
-                  </div>
-                  <button
-                    onClick={fetchOrdersAndReservations}
-                    className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-xs px-4.5 py-2.5 rounded-xl transition-all self-start sm:self-auto cursor-pointer shadow-sm border border-[#C9A84E]/30"
-                  >
-                    Sync Live Queue
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                  {allOrders.length === 0 ? (
-                    <div className="sm:col-span-2 text-center py-16 border-2 border-dashed border-[#C9A84E]/30 rounded-2xl bg-[#FAF8F3]">
-                      <Utensils className="w-10 h-10 text-stone-300 mx-auto mb-2" />
-                      <span className="block text-[#52633E] uppercase font-bold tracking-widest text-xs">No active cafe orders logged yet.</span>
-                    </div>
-                  ) : (
-                    allOrders.map((order) => {
-                      const isCompleted = order.status === "Completed";
-                      return (
-                        <div
-                          key={order.id}
-                          className={`border rounded-2xl p-5 flex flex-col justify-between shadow-sm transition-all duration-300 ${
-                            isCompleted
-                              ? "bg-[#FAF8F3]/50 border-stone-200 opacity-60"
-                              : "bg-[#FAF8F3] border-[#C9A84E]/30 hover:border-[#3E4B2F]"
-                          }`}
-                        >
-                          <div className="space-y-4">
-                            <div className="flex items-start justify-between">
-                              <div>
-                                <span className={`inline-block px-2.5 py-1 rounded-md text-[9px] font-bold tracking-widest uppercase mb-1.5 ${
-                                  order.orderType === "delivery"
-                                    ? "bg-amber-50 text-amber-800 border border-amber-200"
-                                    : "bg-white text-[#3E4B2F] border border-[#C9A84E]/40"
-                                }`}>
-                                  {order.orderType === "delivery" ? "🚀 Delivery" : `🪑 Table ${order.tableNumber}`}
-                                </span>
-                                <h4 className="text-xs font-bold uppercase tracking-wider text-[#26301C] font-mono">{order.id}</h4>
-                                <span className="block text-[9px] text-[#52633E] uppercase tracking-widest mt-0.5">{order.createdAt}</span>
-                              </div>
-                              <span className={`px-2.5 py-1 rounded-md text-[9px] font-bold uppercase tracking-widest ${
-                                order.status === "Completed"
-                                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                                  : order.status === "Ready"
-                                  ? "bg-teal-50 text-teal-700 border border-teal-200 animate-pulse"
-                                  : order.status === "Preparing"
-                                  ? "bg-amber-50 text-amber-700 border border-amber-200"
-                                  : "bg-white text-stone-700 border border-stone-200"
-                              }`}>
-                                {order.status}
-                              </span>
-                            </div>
-
-                            {/* Order items list */}
-                            <div className="bg-white p-3 rounded-xl border border-[#C9A84E]/20 text-xs text-stone-700 space-y-1.5">
-                              {order.items.map((it, idx) => (
-                                <p key={idx} className="flex justify-between font-bold uppercase tracking-wider text-[10px]">
-                                  <span className="text-[#26301C]">
-                                    {it.name} <span className="text-[9px] text-[#52633E] font-bold">×{it.quantity}</span>
-                                  </span>
-                                  <span className="text-[#26301C] font-mono">₹{it.price * it.quantity}</span>
-                                </p>
-                              ))}
-                              {order.orderType === "delivery" && order.deliveryAddress && (
-                                <div className="pt-2 border-t border-stone-100 mt-2">
-                                  <span className="text-[9px] uppercase text-amber-800 font-bold tracking-widest block">Delivery Address:</span>
-                                  <p className="text-[10px] text-[#52633E] font-semibold uppercase tracking-wider leading-normal mt-0.5">{order.deliveryAddress}</p>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="pt-4 border-t border-[#C9A84E]/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-5">
-                            <span className="text-lg font-serif font-bold text-[#26301C]">Total: ₹{order.total}</span>
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => setSelectedBillOrder(order)}
-                                className="bg-white hover:bg-[#FAF8F3] text-[#3E4B2F] border border-[#C9A84E]/30 font-bold uppercase tracking-widest text-[9px] px-3 py-2 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer flex items-center gap-1 shadow-sm"
-                                title="Generate Invoice & Print"
-                              >
-                                <Receipt className="w-3.5 h-3.5 text-[#C9A84E]" />
-                                Bill
-                              </button>
-                              {!isCompleted ? (
-                                <button
-                                  onClick={() => advanceOrderStatus(order.id, order.status)}
-                                  className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-[9px] px-3.5 py-2 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer shadow-sm border border-[#C9A84E]/30"
-                                >
-                                  {order.status === "Ready" ? "Mark Complete" : "Advance Status"}
-                                </button>
-                              ) : (
-                                <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-600 flex items-center gap-1">
-                                  <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
-                                  Settled
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-
-              {/* Live Reservations mini-log (Col-span 4) */}
-              <div className="lg:col-span-4 bg-white text-[#26301C] rounded-3xl p-6 shadow-md shadow-[#3E4B2F]/5 border border-[#C9A84E]/25 space-y-6">
-                <div>
-                  <h3 className="text-lg font-serif font-bold uppercase tracking-wider text-[#3E4B2F] flex items-center gap-2">
-                    <Clock className="w-5 h-5 text-[#C9A84E]" />
-                    Delish Table Reservations
-                  </h3>
-                  <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-bold">Confirmed table bookings scheduled for service.</p>
-                </div>
-
-                <div className="space-y-4 max-h-[460px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-[#ECE4D4] scrollbar-track-transparent">
-                  {allReservations.filter((r) => r.status === "confirmed").length === 0 ? (
-                    <div className="text-center py-12 border border-[#C9A84E]/20 rounded-2xl bg-[#FAF8F3]">
-                      <Users className="w-8 h-8 text-stone-300 mx-auto mb-2" />
-                      <span className="block text-xs text-[#52633E] font-bold uppercase tracking-widest">No table bookings active.</span>
-                    </div>
-                  ) : (
-                    allReservations
-                      .filter((r) => r.status === "confirmed")
-                      .map((r) => (
-                        <div
-                          key={r.id}
-                          className="bg-[#FAF8F3] border border-[#C9A84E]/25 rounded-2xl p-4.5 space-y-3.5 hover:border-[#3E4B2F] transition-all shadow-sm"
-                        >
-                          <div className="flex justify-between items-start">
-                            <div>
-                              <span className="text-[9px] text-[#3E4B2F] uppercase font-bold tracking-widest block font-mono">
-                                Table {r.table}
-                              </span>
-                              <span className="text-sm font-serif font-bold uppercase block mt-0.5 text-[#26301C]">{r.name}</span>
-                            </div>
-                            <span className="text-[9px] font-bold uppercase tracking-widest bg-white text-[#3E4B2F] border border-[#C9A84E]/30 px-2 py-1 rounded-md shadow-sm">
-                              {r.guests} Guests
-                            </span>
-                          </div>
-
-                          <div className="text-[10px] text-[#52633E] space-y-1 uppercase tracking-wider bg-white p-2.5 rounded-xl border border-[#C9A84E]/20 font-semibold">
-                            <p className="flex items-center gap-2"><Calendar className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.date}</p>
-                            <p className="flex items-center gap-2"><Clock className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.time}</p>
-                            <p className="flex items-center gap-2"><Phone className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.phone}</p>
-                          </div>
-                        </div>
-                      ))
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 2: DINING TABLES & SESSIONS CONTROL CENTER */}
-          {activeAdminTab === "tables" && (
-            <div className="space-y-8">
-              <div className="bg-white border border-[#C9A84E]/25 rounded-3xl p-6 sm:p-8 shadow-md shadow-[#3E4B2F]/5 space-y-6">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#F4EFE6] pb-5">
-                  <div>
-                    <h3 className="text-xl font-serif font-bold uppercase tracking-wider text-[#26301C] flex items-center gap-2">
-                      <Users className="w-5 h-5 text-[#C9A84E]" />
-                      Dining Tables & Live Sessions Management
-                    </h3>
-                    <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">
-                      Control physical table states, monitor customer dining sessions, and release occupied tables after guests depart.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-5">
-                  {Array.from({ length: TOTAL_TABLES }, (_, idx) => {
-                    const numStr = String(idx + 1);
-                    const tableObj = allTables.find((t) => t.tableNumber === numStr);
-                    const isOccupied = tableObj?.status === "occupied";
-                    const isReserved = tableObj?.status === "reserved";
-                    const activeSession = activeSessions.find((s) => s.tableNumber === numStr && s.status === "active");
-
-                    return (
-                      <div
-                        key={numStr}
-                        className={`rounded-2xl p-5 border transition-all shadow-sm flex flex-col justify-between ${
-                          isOccupied
-                            ? "bg-rose-50/40 border-rose-300"
-                            : isReserved
-                            ? "bg-amber-50/40 border-amber-300"
-                            : "bg-[#FAF8F3] border-[#C9A84E]/30"
-                        }`}
-                      >
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between">
-                            <span className="font-serif font-black text-lg text-[#26301C]">
-                              Table {numStr}
-                            </span>
-                            <span
-                              className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${
-                                isOccupied
-                                  ? "bg-rose-100 text-rose-800 border border-rose-200"
-                                  : isReserved
-                                  ? "bg-amber-100 text-amber-800 border border-amber-200"
-                                  : "bg-emerald-100 text-emerald-800 border border-emerald-200"
-                              }`}
-                            >
-                              {tableObj?.status || "available"}
-                            </span>
-                          </div>
-
-                          <div className="text-[10px] text-[#52633E] space-y-1 font-semibold">
-                            <p>Capacity: {tableObj?.capacity || 4} Guests</p>
-                            {isOccupied && (
-                              <p className="text-rose-700 font-mono text-[9px] truncate">
-                                Session: {tableObj?.activeSessionId?.slice(0, 12) || "active"}...
-                              </p>
-                            )}
-                            {activeSession && (
-                              <p className="text-[#3E4B2F]">
-                                Orders: {activeSession.orderIds?.length || 0} placed
-                              </p>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="pt-4 mt-4 border-t border-[#C9A84E]/20 space-y-2">
-                          {isOccupied ? (
-                            <button
-                              type="button"
-                              onClick={() => handleCloseTableSession(numStr, tableObj?.activeSessionId)}
-                              className="w-full bg-rose-600 hover:bg-rose-700 text-white font-bold uppercase tracking-wider text-[9px] py-2 rounded-xl transition-all cursor-pointer shadow-sm"
-                            >
-                              Free Table & Close Session
-                            </button>
-                          ) : (
-                            <div className="text-center py-2 text-[10px] text-emerald-700 font-bold uppercase tracking-wider">
-                              Ready for Guests
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Active Sessions Overview Table */}
-              <div className="bg-white border border-[#C9A84E]/25 rounded-3xl p-6 sm:p-8 shadow-md shadow-[#3E4B2F]/5 space-y-4">
-                <h4 className="text-base font-serif font-bold uppercase tracking-wider text-[#26301C] flex items-center gap-2">
-                  <Clock className="w-4 h-4 text-[#C9A84E]" />
-                  Active Dining Sessions Register
-                </h4>
-                {activeSessions.length === 0 ? (
-                  <p className="text-xs text-[#52633E] py-4">No active dining sessions currently open. All tables are cleared.</p>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs">
-                      <thead>
-                        <tr className="border-b border-[#ECE4D4] text-[#52633E] uppercase text-[10px] tracking-wider">
-                          <th className="py-2.5 px-3">Session ID</th>
-                          <th className="py-2.5 px-3">Table</th>
-                          <th className="py-2.5 px-3">Orders</th>
-                          <th className="py-2.5 px-3">Status</th>
-                          <th className="py-2.5 px-3">Started At</th>
-                          <th className="py-2.5 px-3 text-right">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {activeSessions.map((sess) => (
-                          <tr key={sess.id} className="border-b border-[#F4EFE6] font-semibold">
-                            <td className="py-2.5 px-3 font-mono text-[10px]">{sess.id}</td>
-                            <td className="py-2.5 px-3 font-bold text-[#3E4B2F]">Table {sess.tableNumber}</td>
-                            <td className="py-2.5 px-3">{sess.orderIds?.length || 0} order(s)</td>
-                            <td className="py-2.5 px-3">
-                              <span className="px-2 py-0.5 bg-emerald-50 text-emerald-700 rounded text-[9px] font-bold uppercase">
-                                {sess.status}
-                              </span>
-                            </td>
-                            <td className="py-2.5 px-3 text-stone-500 text-[10px]">
-                              {new Date(sess.startTime).toLocaleTimeString()}
-                            </td>
-                            <td className="py-2.5 px-3 text-right">
-                              <button
-                                type="button"
-                                onClick={() => handleCloseTableSession(sess.tableNumber, sess.id)}
-                                className="px-2.5 py-1 bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 rounded-lg text-[9px] font-bold uppercase cursor-pointer"
-                              >
-                                Close
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* TAB 3: RESERVATIONS */}
-          {activeAdminTab === "reservations" && (
-            <div className="bg-white border border-[#C9A84E]/25 rounded-3xl p-6 sm:p-8 shadow-md shadow-[#3E4B2F]/5 space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
+            {/* Live orders log (Col-span 8) */}
+            <div className="lg:col-span-8 bg-white border border-[#C9A84E]/25 rounded-3xl p-6 sm:p-8 shadow-md shadow-[#3E4B2F]/5 space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#F4EFE6] pb-5">
                 <div>
                   <h3 className="text-xl font-serif font-bold uppercase tracking-wider text-[#26301C] flex items-center gap-2">
-                    <Clock className="w-5 h-5 text-[#C9A84E]" />
-                    Delish Table Reservations Log
+                    <TrendingUp className="w-5 h-5 text-[#C9A84E]" />
+                    Delish Kitchen Pipeline
                   </h3>
-                  <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">
-                    Manage guest reservations across all 10 tables. Filter confirmed or cancelled bookings.
-                  </p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                {allReservations.length === 0 ? (
-                  <div className="sm:col-span-3 text-center py-16 border-2 border-dashed border-[#C9A84E]/30 rounded-2xl bg-[#FAF8F3]">
-                    <Clock className="w-10 h-10 text-stone-300 mx-auto mb-2" />
-                    <span className="block text-[#52633E] uppercase font-bold tracking-widest text-xs">No reservations scheduled.</span>
-                  </div>
-                ) : (
-                  allReservations.map((r) => (
-                    <div
-                      key={r.id}
-                      className={`border rounded-2xl p-5 space-y-4 shadow-sm transition-all ${
-                        r.status === "cancelled" ? "bg-stone-50 border-stone-200 opacity-60" : "bg-[#FAF8F3] border-[#C9A84E]/30"
-                      }`}
-                    >
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <span className="text-[9px] text-[#3E4B2F] uppercase font-bold tracking-widest block font-mono">
-                            Table {r.table}
-                          </span>
-                          <span className="text-base font-serif font-bold uppercase block mt-0.5 text-[#26301C]">{r.name}</span>
-                        </div>
-                        <span className={`text-[9px] font-bold uppercase tracking-widest px-2.5 py-1 rounded-md shadow-sm ${
-                          r.status === "confirmed" ? "bg-emerald-50 text-emerald-800 border border-emerald-200" : "bg-rose-50 text-rose-800 border border-rose-200"
-                        }`}>
-                          {r.status}
-                        </span>
-                      </div>
-
-                      <div className="text-[11px] text-[#52633E] space-y-1.5 uppercase tracking-wider bg-white p-3 rounded-xl border border-[#C9A84E]/20 font-semibold">
-                        <p className="flex items-center gap-2"><Calendar className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.date}</p>
-                        <p className="flex items-center gap-2"><Clock className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.time}</p>
-                        <p className="flex items-center gap-2"><Users className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.guests} Guests</p>
-                        <p className="flex items-center gap-2"><Phone className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.phone}</p>
-                      </div>
-
-                      {r.status === "confirmed" && (
-                        <div className="pt-2 flex gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleCancelReservation(r.id)}
-                            className="w-full bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-[10px] font-bold uppercase tracking-widest py-2 rounded-xl transition-all cursor-pointer"
-                          >
-                            Cancel Booking
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* TAB 4: QR CODE GENERATOR */}
-          {activeAdminTab === "qr_codes" && (
-            <div className="bg-white border border-[#C9A84E]/25 rounded-3xl p-6 sm:p-8 shadow-md shadow-[#3E4B2F]/5 space-y-6">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#F4EFE6] pb-5">
-                <div>
-                  <h3 className="text-xl font-serif font-bold uppercase tracking-wider text-[#26301C] flex items-center gap-2">
-                    <QrCode className="w-5 h-5 text-[#C9A84E]" />
-                    Delish Cafe QR Code Generator
-                  </h3>
-                  <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">
-                    Print these QR codes and place on cafe tables. Scanning instantly loads Delish Cafe with that specific table locked in!
-                  </p>
+                  <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">Live cafe customer orders mapped in real time. Advance dish stages as chefs prepare.</p>
                 </div>
                 <button
-                  onClick={() => window.print()}
-                  className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-xs px-5 py-3 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 self-start sm:self-auto border border-[#C9A84E]/30"
+                  onClick={fetchOrdersAndReservations}
+                  className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-xs px-4.5 py-2.5 rounded-xl transition-all self-start sm:self-auto cursor-pointer shadow-sm border border-[#C9A84E]/30"
                 >
-                  <Printer className="w-4 h-4" />
-                  Print QR Sheets
+                  Sync Live Queue
                 </button>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-5">
-                {Array.from({ length: TOTAL_TABLES }, (_, i) => {
-                  const num = i + 1;
-                  const baseHref = typeof window !== "undefined" ? window.location.origin : "";
-                  const tableUrl = `${baseHref}/?table=${num}&lock=true`;
-                  const qrImg = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(tableUrl)}`;
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                {allOrders.length === 0 ? (
+                  <div className="sm:col-span-2 text-center py-16 border-2 border-dashed border-[#C9A84E]/30 rounded-2xl bg-[#FAF8F3]">
+                    <Utensils className="w-10 h-10 text-stone-300 mx-auto mb-2" />
+                    <span className="block text-[#52633E] uppercase font-bold tracking-widest text-xs">No active cafe orders logged yet.</span>
+                  </div>
+                ) : (
+                  allOrders.map((order) => {
+                    const isCompleted = order.status === "Completed";
+                    return (
+                      <div
+                        key={order.id}
+                        className={`border rounded-2xl p-5 flex flex-col justify-between shadow-sm transition-all duration-300 ${
+                          isCompleted
+                            ? "bg-[#FAF8F3]/50 border-stone-200 opacity-60"
+                            : "bg-[#FAF8F3] border-[#C9A84E]/30 hover:border-[#3E4B2F]"
+                        }`}
+                      >
+                        <div className="space-y-4">
+                          <div className="flex items-start justify-between">
+                            <div>
+                              <span className={`inline-block px-2.5 py-1 rounded-md text-[9px] font-bold tracking-widest uppercase mb-1.5 ${
+                                order.orderType === "delivery"
+                                  ? "bg-amber-50 text-amber-800 border border-amber-200"
+                                  : "bg-white text-[#3E4B2F] border border-[#C9A84E]/40"
+                              }`}>
+                                {order.orderType === "delivery" ? "🚀 Delivery" : `🪑 Table ${order.tableNumber}`}
+                              </span>
+                              <h4 className="text-xs font-bold uppercase tracking-wider text-[#26301C] font-mono">{order.id}</h4>
+                              <span className="block text-[9px] text-[#52633E] uppercase tracking-widest mt-0.5">{order.createdAt}</span>
+                            </div>
+                            <span className={`px-2.5 py-1 rounded-md text-[9px] font-bold uppercase tracking-widest ${
+                              order.status === "Completed"
+                                ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                : order.status === "Ready"
+                                ? "bg-teal-50 text-teal-700 border border-teal-200 animate-pulse"
+                                : order.status === "Preparing"
+                                ? "bg-amber-50 text-amber-700 border border-amber-200"
+                                : "bg-white text-stone-700 border border-stone-200"
+                            }`}>
+                              {order.status}
+                            </span>
+                          </div>
 
-                  return (
-                    <div
-                      key={num}
-                      className="border border-[#C9A84E]/25 rounded-2xl p-4 text-center bg-[#FAF8F3] space-y-3.5 flex flex-col items-center justify-between shadow-sm hover:border-[#3E4B2F] transition-all"
-                    >
-                      <div className="flex items-center justify-between w-full">
-                        <h4 className="font-serif font-bold uppercase tracking-wider text-[#26301C] text-xs">Table {num}</h4>
-                        <DelishLogo className="w-6 h-6" />
+                          {/* Order items list */}
+                          <div className="bg-white p-3 rounded-xl border border-[#C9A84E]/20 text-xs text-stone-700 space-y-1.5">
+                            {order.items.map((it, idx) => (
+                              <p key={idx} className="flex justify-between font-bold uppercase tracking-wider text-[10px]">
+                                <span className="text-[#26301C]">
+                                  {it.name} <span className="text-[9px] text-[#52633E] font-bold">×{it.quantity}</span>
+                                </span>
+                                <span className="text-[#26301C] font-mono">₹{it.price * it.quantity}</span>
+                              </p>
+                            ))}
+                            {order.orderType === "delivery" && order.deliveryAddress && (
+                              <div className="pt-2 border-t border-stone-100 mt-2">
+                                <span className="text-[9px] uppercase text-amber-800 font-bold tracking-widest block">Delivery Address:</span>
+                                <p className="text-[10px] text-[#52633E] font-semibold uppercase tracking-wider leading-normal mt-0.5">{order.deliveryAddress}</p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="pt-4 border-t border-[#C9A84E]/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3 mt-5">
+                          <span className="text-lg font-serif font-bold text-[#26301C]">Total: ₹{order.total}</span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => setSelectedBillOrder(order)}
+                              className="bg-white hover:bg-[#FAF8F3] text-[#3E4B2F] border border-[#C9A84E]/30 font-bold uppercase tracking-widest text-[9px] px-3 py-2 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer flex items-center gap-1 shadow-sm"
+                              title="Generate Invoice & Print"
+                            >
+                              <Receipt className="w-3.5 h-3.5 text-[#C9A84E]" />
+                              Bill
+                            </button>
+                            {!isCompleted ? (
+                              <button
+                                onClick={() => advanceOrderStatus(order.id, order.status)}
+                                className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-[9px] px-3.5 py-2 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer shadow-sm border border-[#C9A84E]/30"
+                              >
+                                {order.status === "Ready" ? "Mark Complete" : "Advance Status"}
+                              </button>
+                            ) : (
+                              <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-600 flex items-center gap-1">
+                                <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                                Settled
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </div>
-                      <div className="w-28 h-28 bg-white p-2 rounded-xl border border-[#C9A84E]/30 shadow-inner">
-                        <img src={qrImg} alt={`QR Table ${num}`} className="w-full h-full object-contain" />
-                      </div>
-                      <div className="space-y-1 w-full">
-                        <span className="block text-[8px] text-[#52633E] font-bold truncate tracking-tight">{tableUrl}</span>
-                        <a
-                          href={tableUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-block text-[9px] text-[#3E4B2F] hover:text-[#26301C] font-bold uppercase tracking-widest underline cursor-pointer"
-                        >
-                          Launch Direct &rarr;
-                        </a>
-                      </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })
+                )}
               </div>
             </div>
-          )}
+
+            {/* Live Reservations Log (Col-span 4) */}
+            <div className="lg:col-span-4 bg-white text-[#26301C] rounded-3xl p-6 shadow-md shadow-[#3E4B2F]/5 border border-[#C9A84E]/25 space-y-6">
+              <div>
+                <h3 className="text-lg font-serif font-bold uppercase tracking-wider text-[#3E4B2F] flex items-center gap-2">
+                  <Clock className="w-5 h-5 text-[#C9A84E]" />
+                  Delish Table Reservations
+                </h3>
+                <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-bold">Confirmed table bookings scheduled for service.</p>
+              </div>
+
+              <div className="space-y-4 max-h-[460px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-[#ECE4D4] scrollbar-track-transparent">
+                {allReservations.filter((r) => r.status === "confirmed").length === 0 ? (
+                  <div className="text-center py-12 border border-[#C9A84E]/20 rounded-2xl bg-[#FAF8F3]">
+                    <Users className="w-8 h-8 text-stone-300 mx-auto mb-2" />
+                    <span className="block text-xs text-[#52633E] font-bold uppercase tracking-widest">No table bookings active.</span>
+                  </div>
+                ) : (
+                  allReservations
+                    .filter((r) => r.status === "confirmed")
+                    .map((r) => (
+                      <div
+                        key={r.id}
+                        className="bg-[#FAF8F3] border border-[#C9A84E]/25 rounded-2xl p-4.5 space-y-3.5 hover:border-[#3E4B2F] transition-all shadow-sm"
+                      >
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <span className="text-[9px] text-[#3E4B2F] uppercase font-bold tracking-widest block font-mono">
+                              Table {r.table}
+                            </span>
+                            <span className="text-sm font-serif font-bold uppercase block mt-0.5 text-[#26301C]">{r.name}</span>
+                          </div>
+                          <span className="text-[9px] font-bold uppercase tracking-widest bg-white text-[#3E4B2F] border border-[#C9A84E]/30 px-2 py-1 rounded-md shadow-sm">
+                            {r.guests} Guests
+                          </span>
+                        </div>
+
+                        <div className="text-[10px] text-[#52633E] space-y-1 uppercase tracking-wider bg-white p-2.5 rounded-xl border border-[#C9A84E]/20 font-semibold">
+                          <p className="flex items-center gap-2"><Calendar className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.date}</p>
+                          <p className="flex items-center gap-2"><Clock className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.time}</p>
+                          <p className="flex items-center gap-2"><Phone className="w-3.5 h-3.5 text-[#C9A84E]" /> {r.phone}</p>
+                        </div>
+                      </div>
+                    ))
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Table QR Code Generator - Directly built-in for extreme value */}
+          <div className="bg-white border border-[#C9A84E]/25 rounded-3xl p-6 sm:p-8 shadow-md shadow-[#3E4B2F]/5 space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#F4EFE6] pb-5">
+              <div>
+                <h3 className="text-xl font-serif font-bold uppercase tracking-wider text-[#26301C] flex items-center gap-2">
+                  <QrCode className="w-5 h-5 text-[#C9A84E]" />
+                  Delish Cafe QR Code Generator
+                </h3>
+                <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">
+                  Print these QR codes and place on cafe tables. Scanning instantly loads Delish Cafe with that specific table locked in!
+                </p>
+              </div>
+              <button
+                onClick={() => window.print()}
+                className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-xs px-5 py-3 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 self-start sm:self-auto border border-[#C9A84E]/30"
+              >
+                <Printer className="w-4 h-4" />
+                Print QR Sheets
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-5">
+              {Array.from({ length: TOTAL_TABLES }, (_, i) => {
+                const num = i + 1;
+                const baseHref = typeof window !== "undefined" ? window.location.origin : "";
+                const tableUrl = `${baseHref}/?table=${num}`;
+                const qrImg = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(tableUrl)}`;
+
+                return (
+                  <div
+                    key={num}
+                    className="border border-[#C9A84E]/25 rounded-2xl p-4 text-center bg-[#FAF8F3] space-y-3.5 flex flex-col items-center justify-between shadow-sm hover:border-[#3E4B2F] transition-all"
+                  >
+                    <div className="flex items-center justify-between w-full">
+                      <h4 className="font-serif font-bold uppercase tracking-wider text-[#26301C] text-xs">Table {num}</h4>
+                      <DelishLogo className="w-6 h-6" />
+                    </div>
+                    <div className="w-28 h-28 bg-white p-2 rounded-xl border border-[#C9A84E]/30 shadow-inner">
+                      <img src={qrImg} alt={`QR Table ${num}`} className="w-full h-full object-contain" />
+                    </div>
+                    <div className="space-y-1 w-full">
+                      <span className="block text-[8px] text-[#52633E] font-bold truncate tracking-tight">{tableUrl}</span>
+                      <a
+                        href={tableUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-block text-[9px] text-[#3E4B2F] hover:text-[#26301C] font-bold uppercase tracking-widest underline cursor-pointer"
+                      >
+                        Launch Direct &rarr;
+                      </a>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </section>
       )}
       </div>
@@ -3245,109 +2641,16 @@ export default function App() {
                   <span className="font-serif text-sm">Grand Total Amount</span>
                   <span className="text-2xl text-[#3E4B2F] font-serif font-black italic">₹{cartTotal}</span>
                 </div>
-                {/* Dining Option & Table Selector */}
-                <div className="bg-white rounded-xl p-3 border border-[#C9A84E]/30 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#52633E]">Dining Preference:</span>
-                    <div className="flex gap-1">
-                      <button
-                        type="button"
-                        onClick={() => setOrderType("dine_in")}
-                        className={`px-2.5 py-1 rounded-lg text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer ${
-                          orderType === "dine_in"
-                            ? "bg-[#3E4B2F] text-white"
-                            : "bg-[#FAF8F3] text-[#52633E] hover:bg-[#F4EFE6]"
-                        }`}
-                      >
-                        🪑 Dine-In
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setOrderType("delivery")}
-                        className={`px-2.5 py-1 rounded-lg text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer ${
-                          orderType === "delivery"
-                            ? "bg-[#3E4B2F] text-white"
-                            : "bg-[#FAF8F3] text-[#52633E] hover:bg-[#F4EFE6]"
-                        }`}
-                      >
-                        🏠 Delivery
-                      </button>
-                    </div>
+                {orderType === "dine_in" && activeTableLabel && (
+                  <div className="p-2.5 bg-white text-[#3E4B2F] text-[10px] rounded-lg border border-[#C9A84E]/30 font-bold uppercase tracking-wider text-center">
+                    Dining at Table <span className="font-bold italic text-sm text-[#C9A84E]">{activeTableLabel}</span>
                   </div>
-
-                  {orderType === "dine_in" ? (
-                    <div className="space-y-1.5 pt-1">
-                      {isQrLocked ? (
-                        <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between text-xs text-amber-900 font-bold">
-                          <span className="flex items-center gap-1.5">
-                            <span className="text-sm">🔒</span> Table {qrLockedTable} Locked via QR
-                          </span>
-                          <span className="text-[9px] bg-amber-200/80 text-amber-900 px-2 py-0.5 rounded-full uppercase tracking-wider font-bold">
-                            Verified Table
-                          </span>
-                        </div>
-                      ) : (
-                        <>
-                          <div className="flex items-center justify-between text-[9px] font-bold uppercase tracking-wider text-[#52633E]">
-                            <span>Select Table (1 to {TOTAL_TABLES}):</span>
-                            <span className="text-[#3E4B2F] font-bold">
-                              {activeTableLabel ? `Table ${activeTableLabel}` : "No Table Selected"}
-                            </span>
-                          </div>
-                          <div className="grid grid-cols-5 gap-1.5">
-                            {Array.from({ length: TOTAL_TABLES }, (_, idx) => {
-                              const numStr = String(idx + 1);
-                              const isSelected = activeTableLabel === numStr;
-                              const tableObj = allTables.find((t) => t.tableNumber === numStr);
-                              const isOccupiedByOther = tableObj?.status === "occupied" && tableObj.activeSessionId !== currentDiningSessionId;
-
-                              return (
-                                <button
-                                  key={numStr}
-                                  type="button"
-                                  onClick={() => {
-                                    if (isOccupiedByOther) {
-                                      showToast(`Table ${numStr} is currently occupied by another dining guest.`);
-                                      return;
-                                    }
-                                    handleSetTable(numStr);
-                                  }}
-                                  className={`relative py-1.5 text-center font-bold text-xs rounded-lg transition-all border cursor-pointer ${
-                                    isSelected
-                                      ? "bg-[#3E4B2F] text-white border-[#3E4B2F] shadow-sm"
-                                      : isOccupiedByOther
-                                      ? "bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed"
-                                      : "bg-[#FAF8F3] text-[#26301C] border-[#C9A84E]/30 hover:border-[#3E4B2F]"
-                                  }`}
-                                  title={isOccupiedByOther ? `Table ${numStr} is currently occupied` : `Table ${numStr}`}
-                                >
-                                  {numStr}
-                                  {isOccupiedByOther && !isSelected && (
-                                    <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-rose-500" />
-                                  )}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="space-y-1 pt-1">
-                      <label className="text-[9px] font-bold uppercase tracking-wider text-[#52633E] block">
-                        Ahmedabad Delivery Address:
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="House/flat no, street, landmark, area..."
-                        value={deliveryAddress}
-                        onChange={(e) => setDeliveryAddress(e.target.value)}
-                        className="w-full px-3 py-2 text-xs border border-[#C9A84E]/30 rounded-lg bg-[#FAF8F3] font-bold text-[#26301C] focus:outline-none focus:border-[#3E4B2F]"
-                      />
-                    </div>
-                  )}
-                </div>
-
+                )}
+                {orderType === "delivery" && deliveryAddress.trim() && (
+                  <div className="p-2.5 bg-white text-amber-900 text-[9px] rounded-lg border border-amber-200 font-bold uppercase tracking-wider truncate">
+                    Deliver to: <span className="text-[#52633E]">{deliveryAddress}</span>
+                  </div>
+                )}
                 <button
                   onClick={handlePlaceOrderClick}
                   disabled={cart.length === 0}

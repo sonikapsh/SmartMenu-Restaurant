@@ -18,6 +18,8 @@ export interface CartItem {
   quantity: number;
 }
 
+export type UserRole = "OWNER" | "MANAGER" | "STAFF" | "KITCHEN" | "DELIVERY" | "CUSTOMER";
+
 export interface Order {
   id: string;
   tableNumber: string;
@@ -29,7 +31,30 @@ export interface Order {
   createdAt: string;
   paymentMethod?: string;
   paymentId?: string;
+  paymentStatus?: "pending" | "paid";
   sessionId?: string;
+  idempotencyKey?: string;
+  isQrOrder?: boolean;
+}
+
+export interface DiningSession {
+  id: string;
+  sessionId: string;
+  tableId: string;
+  status: "active" | "closed";
+  startedAt: string;
+  closedAt?: string | null;
+  total: number;
+  orderIds: string[];
+  closedBy?: string;
+}
+
+export interface DiningTable {
+  id: string;
+  tableNumber: string;
+  status: "available" | "occupied";
+  activeSessionId?: string | null;
+  updatedAt: string;
 }
 
 export interface Reservation {

@@ -94,6 +94,68 @@
         }
       },
       "required": ["date", "time", "table", "guests", "name", "phone", "status", "createdAt"]
+    },
+    "Table": {
+      "title": "Table",
+      "description": "A cafe dining table with its active session pointer",
+      "type": "object",
+      "properties": {
+        "tableNumber": {
+          "type": "string",
+          "description": "Table number identifier"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["available", "occupied"],
+          "description": "Table occupancy state"
+        },
+        "activeSessionId": {
+          "type": "string",
+          "description": "ID of current active dining session or empty"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last updated timestamp"
+        }
+      },
+      "required": ["tableNumber", "status", "updatedAt"]
+    },
+    "Session": {
+      "title": "Session",
+      "description": "A dining session for a table encompassing multiple orders",
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "description": "Unique session identifier"
+        },
+        "tableId": {
+          "type": "string",
+          "description": "Assigned table number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "closed"],
+          "description": "Session lifecycle state"
+        },
+        "startedAt": {
+          "type": "string",
+          "description": "Timestamp when session began"
+        },
+        "closedAt": {
+          "type": "string",
+          "description": "Timestamp when session was finalized and table freed"
+        },
+        "total": {
+          "type": "number",
+          "description": "Cumulative total of all orders in this session"
+        },
+        "orderIds": {
+          "type": "array",
+          "description": "List of order IDs placed during this visit"
+        }
+      },
+      "required": ["sessionId", "tableId", "status", "startedAt"]
     }
   },
   "firestore": {
@@ -104,6 +166,14 @@
     "reservations/{reservationId}": {
       "schema": "Reservation",
       "description": "Collection of table reservations"
+    },
+    "tables/{tableId}": {
+      "schema": "Table",
+      "description": "Collection of cafe dining tables and their active session references"
+    },
+    "sessions/{sessionId}": {
+      "schema": "Session",
+      "description": "Collection of dining sessions per table"
     }
   }
 }
