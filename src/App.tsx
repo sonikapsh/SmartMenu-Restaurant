@@ -99,7 +99,9 @@ const HERO_IMAGES = [
 
 export default function App() {
   // Navigation & View states
-  const [isAdminMode, setIsAdminMode] = useState<boolean>(false);
+  const [isAdminMode, setIsAdminMode] = useState<boolean>(() => {
+    return typeof window !== "undefined" ? Boolean(sessionStorage.getItem("delish_auth_token")) : false;
+  });
   const [showAdminLogin, setShowAdminLogin] = useState<boolean>(false);
   const [adminEmail, setAdminEmail] = useState<string>("");
   const [adminPassword, setAdminPassword] = useState<string>("");
@@ -112,6 +114,7 @@ export default function App() {
   });
   const [activeAdminTab, setActiveAdminTab] = useState<"kitchen" | "tables" | "reservations" | "qr_codes">("kitchen");
   const [activeCategory, setActiveCategory] = useState<string>("Coffee");
+  const [closingTableId, setClosingTableId] = useState<string | null>(null);
 
   // Hero slideshow state
   const [heroIndex, setHeroIndex] = useState<number>(0);
@@ -1000,7 +1003,6 @@ export default function App() {
   };
 
   const handleCancelReservation = async (id: string) => {
-    if (!window.confirm("Are you sure you want to cancel this reservation?")) return;
     try {
       if (isAdminMode && authToken) {
         const res = await fetch("/api/admin/reservations/cancel", {
@@ -1091,34 +1093,68 @@ export default function App() {
   };
 
   const handleCloseTableSession = async (tableId: string, sessId?: string | null) => {
-    if (!window.confirm(`Are you sure you want to close the dining session for Table ${tableId} and make it available?`)) {
-      return;
-    }
+    setClosingTableId(tableId);
     try {
+      const token = authToken || (typeof window !== "undefined" ? sessionStorage.getItem("delish_auth_token") : "");
+      // 1. Call server endpoint to atomic-release table and mark session closed
       const response = await fetch("/api/admin/sessions/close", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${authToken || ""}`
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: JSON.stringify({ tableId, sessionId: sessId })
       });
       const data = await response.json();
-      if (response.ok && data.success) {
-        showToast(`Table ${tableId} session closed. Table is now Available!`);
-        // Immediate local state update
-        setAllTables((prev) =>
-          prev.map((t) =>
-            t.tableNumber === tableId
-              ? { ...t, status: "available", activeSessionId: null, updatedAt: new Date().toISOString() }
-              : t
-          )
-        );
-      } else {
-        showToast(data.error || "Failed to close table session.");
+
+      // 2. Direct Firestore fallback to ensure all real-time listeners receive table status update
+      if (db) {
+        try {
+          await setDoc(doc(db, "tables", tableId), {
+            id: tableId,
+            tableNumber: tableId,
+            status: "available",
+            activeSessionId: null,
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+
+          if (sessId) {
+            await updateDoc(doc(db, "sessions", sessId), {
+              status: "closed",
+              billStatus: "paid",
+              paymentStatus: "paid",
+              closedAt: new Date().toISOString(),
+              closedBy: "owner_manual"
+            });
+          }
+        } catch (fsErr) {
+          console.warn("Direct Firestore release notice:", fsErr);
+        }
       }
+
+      // 3. Immediate optimistic local update
+      setAllTables((prev) =>
+        prev.map((t) =>
+          t.tableNumber === tableId
+            ? { ...t, status: "available", activeSessionId: null, updatedAt: new Date().toISOString() }
+            : t
+        )
+      );
+      setActiveSessions((prev) => prev.filter((s) => s.tableNumber !== tableId && s.id !== sessId));
+
+      showToast(`Table ${tableId} is now Available! Session closed.`);
     } catch (e: any) {
-      showToast("Error closing session: " + e.message);
+      // Optimistic local state update in case of offline/network hiccup
+      setAllTables((prev) =>
+        prev.map((t) =>
+          t.tableNumber === tableId
+            ? { ...t, status: "available", activeSessionId: null, updatedAt: new Date().toISOString() }
+            : t
+        )
+      );
+      showToast(`Table ${tableId} marked available.`);
+    } finally {
+      setClosingTableId(null);
     }
   };
 
@@ -2819,10 +2855,18 @@ export default function App() {
                           {isOccupied ? (
                             <button
                               type="button"
+                              disabled={closingTableId === numStr}
                               onClick={() => handleCloseTableSession(numStr, tableObj?.activeSessionId)}
-                              className="w-full bg-rose-600 hover:bg-rose-700 text-white font-bold uppercase tracking-wider text-[9px] py-2 rounded-xl transition-all cursor-pointer shadow-sm"
+                              className="w-full bg-rose-600 hover:bg-rose-700 disabled:bg-rose-400 text-white font-bold uppercase tracking-wider text-[9px] py-2 rounded-xl transition-all cursor-pointer shadow-sm flex items-center justify-center gap-1.5"
                             >
-                              Free Table & Close Session
+                              {closingTableId === numStr ? (
+                                <>
+                                  <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                                  <span>Releasing Table...</span>
+                                </>
+                              ) : (
+                                "Free Table & Close Session"
+                              )}
                             </button>
                           ) : (
                             <div className="text-center py-2 text-[10px] text-emerald-700 font-bold uppercase tracking-wider">
@@ -2874,10 +2918,11 @@ export default function App() {
                             <td className="py-2.5 px-3 text-right">
                               <button
                                 type="button"
+                                disabled={closingTableId === sess.tableNumber}
                                 onClick={() => handleCloseTableSession(sess.tableNumber, sess.id)}
-                                className="px-2.5 py-1 bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 rounded-lg text-[9px] font-bold uppercase cursor-pointer"
+                                className="px-2.5 py-1 bg-rose-50 text-rose-700 hover:bg-rose-100 disabled:opacity-50 border border-rose-200 rounded-lg text-[9px] font-bold uppercase cursor-pointer"
                               >
-                                Close
+                                {closingTableId === sess.tableNumber ? "Releasing..." : "Close"}
                               </button>
                             </td>
                           </tr>

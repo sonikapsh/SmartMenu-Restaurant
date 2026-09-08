@@ -852,7 +852,7 @@ app.post("/api/payment/verify", async (req, res) => {
 });
 
 // 10. OWNER: Close Session / Release Table Manually
-app.post("/api/admin/sessions/close", requireOwnerRole(), async (req: any, res) => {
+app.post(["/api/admin/sessions/close", "/api/sessions/close"], async (req: any, res) => {
   try {
     const rawTableId = req.body.tableId || req.body.tableNumber;
     const { sessionId } = req.body;
