@@ -18,7 +18,7 @@ export interface CartItem {
   quantity: number;
 }
 
-export type UserRole = "OWNER" | "MANAGER" | "STAFF" | "KITCHEN" | "DELIVERY" | "CUSTOMER";
+export type UserRole = "OWNER";
 
 export interface Order {
   id: string;
@@ -27,11 +27,11 @@ export interface Order {
   deliveryAddress?: string;
   items: CartItem[];
   total: number;
-  status: "Received" | "Preparing" | "Ready" | "Completed";
+  status: "Received" | "Preparing" | "Ready" | "Completed" | "Cancelled" | "Expired";
   createdAt: string;
   paymentMethod?: string;
   paymentId?: string;
-  paymentStatus?: "pending" | "paid";
+  paymentStatus?: "unpaid" | "pending" | "paid" | "failed" | "refunded";
   sessionId?: string;
   idempotencyKey?: string;
   isQrOrder?: boolean;
@@ -41,8 +41,12 @@ export interface DiningSession {
   id: string;
   sessionId: string;
   tableId: string;
+  tableNumber?: string;
   status: "active" | "closed";
+  billStatus?: "open" | "requested" | "paid";
+  paymentStatus?: "unpaid" | "pending" | "paid" | "failed";
   startedAt: string;
+  startTime?: string;
   closedAt?: string | null;
   total: number;
   orderIds: string[];
@@ -65,7 +69,7 @@ export interface Reservation {
   guests: number;
   name: string;
   phone: string;
-  status: "confirmed" | "cancelled";
+  status: "confirmed" | "cancelled" | "seated" | "checked_in" | "no_show";
   createdAt: string;
   sessionId?: string;
 }

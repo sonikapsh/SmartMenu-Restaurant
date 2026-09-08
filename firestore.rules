@@ -16,7 +16,7 @@ service cloud.firestore {
     function isValidOrder(data) {
       return data.orderType is string && (data.orderType == 'dine_in' || data.orderType == 'delivery')
         && data.total is number && data.total >= 0
-        && data.status is string && (data.status == 'Received' || data.status == 'Preparing' || data.status == 'Ready' || data.status == 'Completed')
+        && data.status is string && (data.status == 'Received' || data.status == 'Preparing' || data.status == 'Ready' || data.status == 'Completed' || data.status == 'Cancelled' || data.status == 'Expired')
         && data.createdAt is string && data.createdAt.size() <= 100;
     }
 
@@ -28,7 +28,7 @@ service cloud.firestore {
         && data.guests is number && data.guests > 0
         && data.name is string && data.name.size() <= 100
         && data.phone is string && data.phone.size() <= 50
-        && data.status is string && (data.status == 'confirmed' || data.status == 'cancelled')
+        && data.status is string && (data.status == 'confirmed' || data.status == 'cancelled' || data.status == 'seated' || data.status == 'checked_in' || data.status == 'no_show')
         && data.createdAt is string && data.createdAt.size() <= 100;
     }
 

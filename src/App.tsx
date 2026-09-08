@@ -35,6 +35,9 @@ import {
 import { menuData } from "./menuData";
 import { MenuItem, CartItem, Order, Reservation, DiningSession, DiningTable, UserRole } from "./types";
 import { DelishLogo } from "./components/DelishLogo";
+import { OrderPlacedModal } from "./components/OrderPlacedModal";
+import { SessionBillModal } from "./components/SessionBillModal";
+import { OwnerAnalyticsWidget } from "./components/OwnerAnalyticsWidget";
 import { initializeApp } from "firebase/app";
 import {
   getFirestore,
@@ -151,6 +154,15 @@ export default function App() {
   const [showSummaryModal, setShowSummaryModal] = useState<boolean>(false);
   const [showPaymentModal, setShowPaymentModal] = useState<boolean>(false);
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<string>("pay_at_counter");
+  const [showPlacedModal, setShowPlacedModal] = useState<boolean>(false);
+  const [placedOrderData, setPlacedOrderData] = useState<{
+    orderId: string;
+    tableNumber: string;
+    orderType: "dine_in" | "delivery";
+    runningTotal: number;
+  } | null>(null);
+  const [showSessionBillModal, setShowSessionBillModal] = useState<boolean>(false);
+  const [sessionRunningTotal, setSessionRunningTotal] = useState<number>(0);
 
   // Reservation Form State
   const [resDate, setResDate] = useState<string>("");
@@ -563,11 +575,37 @@ export default function App() {
       showToast(`Invalid table! Delish Cafe has Tables 1 to ${TOTAL_TABLES} only.`);
       return;
     }
+    const tStr = String(num);
+    // Check if table is occupied by another party
+    const targetTableObj = allTables.find((t) => t.tableNumber === tStr);
+    if (targetTableObj?.status === "occupied" && targetTableObj.activeSessionId && targetTableObj.activeSessionId !== currentDiningSessionId) {
+      setTableInputError(`Table ${tStr} is currently occupied by an active dining party.`);
+      showToast(`Table ${tStr} is currently occupied by an active dining party.`);
+      return;
+    }
+
     setTableInputError("");
-    setTableNumber(String(num));
-    setActiveTableLabel(String(num));
+    setTableNumber(tStr);
+    setActiveTableLabel(tStr);
     setOrderType("dine_in");
-    localStorage.setItem(`delish_table_${customerSessionId}`, String(num));
+    localStorage.setItem(`delish_table_${customerSessionId}`, tStr);
+
+    fetch("/api/sessions/get-or-create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tableId: tStr, existingSessionId: currentDiningSessionId || customerSessionId })
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.occupied) {
+          showToast(data.error || `Table ${tStr} is occupied.`);
+        } else if (data.success && data.sessionId) {
+          setCurrentDiningSessionId(data.sessionId);
+          sessionStorage.setItem("delish_current_session_id", data.sessionId);
+        }
+      })
+      .catch((err) => console.error("Session sync error:", err));
+
     showToast(`Table ${num} selected!`);
   };
 
@@ -628,7 +666,7 @@ export default function App() {
   };
 
   // Placing the order flow
-  const handlePlaceOrderClick = () => {
+  const handlePlaceOrderClick = async () => {
     if (cart.length === 0) {
       showToast("Your cart is empty!");
       return;
@@ -639,6 +677,10 @@ export default function App() {
         showToast(`Please select a valid table (Tables 1 to ${TOTAL_TABLES}) first!`);
         return;
       }
+      // DINE-IN: Direct dispatch to kitchen without upfront payment!
+      setIsCartOpen(false);
+      await submitOrderToBackend("Dining Session Bill", "");
+      return;
     }
     if (orderType === "delivery" && !deliveryAddress.trim()) {
       showToast("Delivery address is required!");
@@ -716,14 +758,21 @@ export default function App() {
       setCart([]);
       localStorage.removeItem(`delish_cart_${customerSessionId}`);
       setShowPaymentModal(false);
-      showToast(data.duplicated ? "Order already verified!" : "Order placed successfully!");
+      setShowSummaryModal(false);
 
-      // Scroll to active tracking
-      setTimeout(() => {
-        if (menuRef.current) {
-          menuRef.current.scrollIntoView({ behavior: "smooth" });
-        }
-      }, 400);
+      const computedRunningTotal = data.runningTotal || (sessionRunningTotal + createdOrder.total);
+      setSessionRunningTotal(computedRunningTotal);
+
+      // Open the Order Confirmation Modal
+      setPlacedOrderData({
+        orderId: createdOrder.id,
+        tableNumber: targetTable,
+        orderType: targetOrderType,
+        runningTotal: computedRunningTotal
+      });
+      setShowPlacedModal(true);
+
+      showToast(data.duplicated ? "Order already verified!" : "Order sent to kitchen!");
     } catch (e: any) {
       console.warn("Backend order API fallback notice:", e);
       try {
@@ -751,7 +800,20 @@ export default function App() {
         setCart([]);
         localStorage.removeItem(`delish_cart_${customerSessionId}`);
         setShowPaymentModal(false);
-        showToast("Order placed successfully!");
+        setShowSummaryModal(false);
+
+        const computedRunningTotal = sessionRunningTotal + fallbackOrder.total;
+        setSessionRunningTotal(computedRunningTotal);
+
+        setPlacedOrderData({
+          orderId: fallbackId,
+          tableNumber: targetTable,
+          orderType: targetOrderType,
+          runningTotal: computedRunningTotal
+        });
+        setShowPlacedModal(true);
+
+        showToast("Order sent to kitchen!");
       } catch (err: any) {
         showToast("Error placing order: " + err.message);
       }
@@ -940,11 +1002,47 @@ export default function App() {
   const handleCancelReservation = async (id: string) => {
     if (!window.confirm("Are you sure you want to cancel this reservation?")) return;
     try {
+      if (isAdminMode && authToken) {
+        const res = await fetch("/api/admin/reservations/cancel", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${authToken}`
+          },
+          body: JSON.stringify({ reservationId: id })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          showToast("Reservation Cancelled.");
+          return;
+        }
+      }
       await updateDoc(doc(db, "reservations", id), { status: "cancelled" });
       showToast("Reservation Cancelled.");
     } catch (e: any) {
       console.error("Firestore cancel reservation failed:", e);
       showToast("Error cancelling reservation.");
+    }
+  };
+
+  const handleCheckInReservation = async (id: string) => {
+    try {
+      const res = await fetch("/api/admin/reservations/check-in", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`
+        },
+        body: JSON.stringify({ reservationId: id })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        showToast(`Guest seated at Table ${data.tableNumber}! Session opened.`);
+      } else {
+        showToast(data.error || "Failed to check in reservation.");
+      }
+    } catch (err: any) {
+      showToast("Check in error: " + err.message);
     }
   };
 
@@ -1345,49 +1443,21 @@ export default function App() {
                 </div>
 
                 <div className="p-3.5 bg-[#FAF8F3] border border-[#C9A84E]/30 rounded-xl space-y-2">
-                  <span className="text-[#C9A84E] block uppercase tracking-wider text-[9px] font-bold">Quick Role Login Presets:</span>
-                  <div className="grid grid-cols-2 gap-2 text-[10px]">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminEmail("admin@gmail.com");
-                        setAdminPassword("admin123");
-                      }}
-                      className="px-2 py-1.5 bg-white border border-[#C9A84E]/40 text-[#3E4B2F] rounded-lg hover:bg-[#F4EFE6] transition-all text-left font-bold"
-                    >
-                      👑 Owner <span className="block text-[8px] font-normal text-[#52633E]">admin@gmail.com</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminEmail("kitchen");
-                        setAdminPassword("kitchen123");
-                      }}
-                      className="px-2 py-1.5 bg-white border border-[#C9A84E]/40 text-[#3E4B2F] rounded-lg hover:bg-[#F4EFE6] transition-all text-left font-bold"
-                    >
-                      🍳 Kitchen <span className="block text-[8px] font-normal text-[#52633E]">kitchen / kitchen123</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminEmail("staff");
-                        setAdminPassword("staff123");
-                      }}
-                      className="px-2 py-1.5 bg-white border border-[#C9A84E]/40 text-[#3E4B2F] rounded-lg hover:bg-[#F4EFE6] transition-all text-left font-bold"
-                    >
-                      📋 Floor Staff <span className="block text-[8px] font-normal text-[#52633E]">staff / staff123</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAdminEmail("manager");
-                        setAdminPassword("manager123");
-                      }}
-                      className="px-2 py-1.5 bg-white border border-[#C9A84E]/40 text-[#3E4B2F] rounded-lg hover:bg-[#F4EFE6] transition-all text-left font-bold"
-                    >
-                      👔 Manager <span className="block text-[8px] font-normal text-[#52633E]">manager / manager123</span>
-                    </button>
-                  </div>
+                  <span className="text-[#C9A84E] block uppercase tracking-wider text-[9px] font-bold">Cafe Owner Credentials:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdminEmail("admin@gmail.com");
+                      setAdminPassword("admin123");
+                    }}
+                    className="w-full px-3 py-2 bg-white border border-[#C9A84E]/40 text-[#3E4B2F] rounded-xl hover:bg-[#F4EFE6] transition-all text-left font-bold flex items-center justify-between"
+                  >
+                    <div>
+                      <span className="text-xs">👑 Delish Cafe Owner</span>
+                      <span className="block text-[9px] font-normal text-[#52633E]">admin@gmail.com / admin123</span>
+                    </div>
+                    <span className="text-[10px] text-[#C9A84E] uppercase font-bold">Auto-fill</span>
+                  </button>
                 </div>
 
                 {adminLoginError && (
@@ -2458,39 +2528,8 @@ export default function App() {
       ) : (
         // ================= OWNER DASHBOARD =================
         <section className="py-12 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-12 bg-[#FAF8F3]">
-          {/* Dashboard Header Stats */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            <div className="bg-white border border-[#C9A84E]/25 p-6 rounded-2xl shadow-md shadow-[#3E4B2F]/5">
-              <span className="text-[10px] text-[#52633E] uppercase font-bold tracking-widest block">Active Kitchen Orders</span>
-              <div className="flex items-baseline gap-2 mt-2">
-                <span className="text-4xl font-serif font-black italic text-[#26301C]">{pendingOrdersCount}</span>
-                <span className="text-[10px] text-[#C9A84E] uppercase font-bold tracking-wider">In kitchen queue</span>
-              </div>
-            </div>
-            <div className="bg-white border border-[#C9A84E]/25 p-6 rounded-2xl shadow-md shadow-[#3E4B2F]/5">
-              <span className="text-[10px] text-[#52633E] uppercase font-bold tracking-widest block">Confirmed Tables Booked</span>
-              <div className="flex items-baseline gap-2 mt-2">
-                <span className="text-4xl font-serif font-black italic text-[#26301C]">{activeReservationsCount}</span>
-                <span className="text-[10px] text-[#3E4B2F] uppercase font-bold tracking-wider">Slots booked</span>
-              </div>
-            </div>
-            <div className="bg-white border border-[#C9A84E]/25 p-6 rounded-2xl shadow-md shadow-[#3E4B2F]/5">
-              <span className="text-[10px] text-[#52633E] uppercase font-bold tracking-widest block">Table Capacity Limit</span>
-              <div className="flex items-baseline gap-2 mt-2">
-                <span className="text-4xl font-serif font-black italic text-[#26301C]">{TOTAL_TABLES}</span>
-                <span className="text-[10px] text-[#52633E] uppercase font-bold tracking-wider">Cafe Tables</span>
-              </div>
-            </div>
-            <div className="bg-white border border-[#C9A84E]/25 p-6 rounded-2xl shadow-md shadow-[#3E4B2F]/5">
-              <span className="text-[10px] text-[#52633E] uppercase font-bold tracking-widest block">Gross Cafe Revenue</span>
-              <div className="flex items-baseline gap-2 mt-2">
-                <span className="text-4xl font-serif font-black italic text-[#3E4B2F]">
-                  ₹{allOrders.filter((o) => o.status === "Completed").reduce((s, o) => s + o.total, 0)}
-                </span>
-                <span className="text-[9px] uppercase bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold px-1.5 py-0.5 rounded-md tracking-widest">Realized</span>
-              </div>
-            </div>
-          </div>
+          {/* Executive Analytics Component with Today/This Week/This Month Toggle */}
+          <OwnerAnalyticsWidget authToken={authToken} />
 
           {/* Admin Navigation Tabs */}
           <div className="flex flex-wrap items-center gap-2.5 border-b border-[#C9A84E]/30 pb-4">
@@ -2562,13 +2601,15 @@ export default function App() {
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                  {allOrders.length === 0 ? (
+                  {allOrders.filter((o) => o.status !== "Cancelled" && o.status !== "Expired").length === 0 ? (
                     <div className="sm:col-span-2 text-center py-16 border-2 border-dashed border-[#C9A84E]/30 rounded-2xl bg-[#FAF8F3]">
                       <Utensils className="w-10 h-10 text-stone-300 mx-auto mb-2" />
                       <span className="block text-[#52633E] uppercase font-bold tracking-widest text-xs">No active cafe orders logged yet.</span>
                     </div>
                   ) : (
-                    allOrders.map((order) => {
+                    allOrders
+                      .filter((o) => o.status !== "Cancelled" && o.status !== "Expired")
+                      .map((order) => {
                       const isCompleted = order.status === "Completed";
                       return (
                         <div
@@ -2900,7 +2941,14 @@ export default function App() {
                       </div>
 
                       {r.status === "confirmed" && (
-                        <div className="pt-2 flex gap-2">
+                        <div className="pt-2 grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleCheckInReservation(r.id)}
+                            className="w-full bg-[#3E4B2F] hover:bg-[#323E25] text-white text-[10px] font-bold uppercase tracking-widest py-2 rounded-xl transition-all cursor-pointer shadow-sm border border-[#C9A84E]/30"
+                          >
+                            Seat Guests
+                          </button>
                           <button
                             type="button"
                             onClick={() => handleCancelReservation(r.id)}
@@ -2908,6 +2956,11 @@ export default function App() {
                           >
                             Cancel Booking
                           </button>
+                        </div>
+                      )}
+                      {r.status === "seated" && (
+                        <div className="pt-2 text-center py-1.5 bg-emerald-50 text-emerald-800 text-[10px] font-bold uppercase tracking-wider rounded-xl border border-emerald-200">
+                          Seated at Table {r.table}
                         </div>
                       )}
                     </div>
@@ -3649,6 +3702,78 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
+
+      {/* ================= ORDER CONFIRMATION MODAL ================= */}
+      {placedOrderData && (
+        <OrderPlacedModal
+          isOpen={showPlacedModal}
+          onClose={() => setShowPlacedModal(false)}
+          orderId={placedOrderData.orderId}
+          tableNumber={placedOrderData.tableNumber}
+          orderType={placedOrderData.orderType}
+          runningTotal={placedOrderData.runningTotal}
+          onOrderMore={() => {
+            setShowPlacedModal(false);
+            if (menuRef.current) {
+              menuRef.current.scrollIntoView({ behavior: "smooth" });
+            }
+          }}
+          onViewBill={() => {
+            setShowPlacedModal(false);
+            setShowSessionBillModal(true);
+          }}
+          onRequestBill={async () => {
+            if (currentDiningSessionId) {
+              try {
+                await fetch(`/api/sessions/${currentDiningSessionId}/request-bill`, { method: "POST" });
+                showToast("Final bill requested! Waiter notified.");
+              } catch (e) {
+                console.warn(e);
+              }
+            }
+            setShowPlacedModal(false);
+            setShowSessionBillModal(true);
+          }}
+        />
+      )}
+
+      {/* ================= SESSION RUNNING & FINAL BILL MODAL ================= */}
+      <SessionBillModal
+        isOpen={showSessionBillModal}
+        onClose={() => setShowSessionBillModal(false)}
+        sessionId={currentDiningSessionId || customerSessionId}
+        tableNumber={activeTableLabel || qrLockedTable || "1"}
+        onPaymentSuccess={() => {
+          showToast("Bill settled! Table released.");
+          setSessionRunningTotal(0);
+          setTableNumber("");
+          setActiveTableLabel("");
+          setCurrentDiningSessionId(null);
+          sessionStorage.removeItem("delish_current_session_id");
+          sessionStorage.removeItem("delish_qr_table_locked");
+          setIsQrLocked(false);
+          setQrLockedTable("");
+        }}
+      />
+
+      {/* ================= FLOATING RUNNING BILL BUTTON FOR SEATED DINERS ================= */}
+      {!isAdminMode && orderType === "dine_in" && activeTableLabel && sessionRunningTotal > 0 && (
+        <motion.button
+          initial={{ y: 20, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          onClick={() => setShowSessionBillModal(true)}
+          className="fixed bottom-6 right-6 z-40 bg-[#FAF8F3] hover:bg-white text-[#26301C] border-2 border-[#C9A84E] px-4.5 py-3 rounded-2xl shadow-xl flex items-center gap-3 transition-all hover:scale-105 active:scale-95 cursor-pointer font-bold uppercase tracking-wider"
+          title="View running bill for your table"
+        >
+          <div className="w-8 h-8 rounded-xl bg-[#3E4B2F] text-white flex items-center justify-center">
+            <Receipt className="w-4 h-4 text-[#C9A84E]" />
+          </div>
+          <div className="text-left">
+            <span className="text-[9px] text-[#52633E] block font-bold">Table {activeTableLabel} Bill</span>
+            <span className="text-sm font-serif font-black text-[#3E4B2F]">₹{sessionRunningTotal}</span>
+          </div>
+        </motion.button>
+      )}
     </div>
   );
 }

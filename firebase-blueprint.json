@@ -28,12 +28,17 @@
         },
         "status": {
           "type": "string",
-          "enum": ["Received", "Preparing", "Ready", "Completed"],
+          "enum": ["Received", "Preparing", "Ready", "Completed", "Cancelled", "Expired"],
           "description": "Order processing status"
         },
         "createdAt": {
           "type": "string",
           "description": "Creation timestamp"
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["unpaid", "pending", "paid", "failed", "refunded"],
+          "description": "Payment settlement status"
         },
         "paymentMethod": {
           "type": "string",
@@ -81,7 +86,7 @@
         },
         "status": {
           "type": "string",
-          "enum": ["confirmed", "cancelled"],
+          "enum": ["confirmed", "cancelled", "seated", "checked_in", "no_show"],
           "description": "Reservation status"
         },
         "createdAt": {
@@ -137,6 +142,16 @@
           "type": "string",
           "enum": ["active", "closed"],
           "description": "Session lifecycle state"
+        },
+        "billStatus": {
+          "type": "string",
+          "enum": ["open", "requested", "paid"],
+          "description": "Session final bill status"
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["unpaid", "pending", "paid", "failed"],
+          "description": "Session payment status"
         },
         "startedAt": {
           "type": "string",
