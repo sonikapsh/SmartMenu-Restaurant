@@ -191,6 +191,33 @@ export const SessionBillModal: React.FC<SessionBillModalProps> = ({
     }
   };
 
+  const handlePayCounter = async () => {
+    if (!billData || billData.finalAmount <= 0 || isPaying) return;
+    setIsPaying(true);
+    try {
+      const verifyRes = await fetch("/api/payment/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          razorpay_payment_id: "COUNTER_CASH_" + Math.random().toString(36).substring(2, 9).toUpperCase(),
+          sessionId,
+          tableNumber
+        })
+      });
+      const verifyData = await verifyRes.json();
+      if (verifyData.success) {
+        setPaymentSuccess(true);
+        onPaymentSuccess?.();
+      } else {
+        alert(verifyData.error || "Counter payment registration failed.");
+      }
+    } catch (e) {
+      alert("Error contacting billing server.");
+    } finally {
+      setIsPaying(false);
+    }
+  };
+
   const handlePrint = () => {
     window.print();
   };
@@ -420,6 +447,16 @@ export const SessionBillModal: React.FC<SessionBillModalProps> = ({
                     {isRequesting ? "Requesting..." : "Request Final Bill"}
                   </button>
                 )}
+
+                <button
+                  type="button"
+                  onClick={handlePayCounter}
+                  disabled={isPaying}
+                  className="bg-white hover:bg-[#FAF8F3] text-[#3E4B2F] border border-[#C9A84E]/40 px-4 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer flex items-center gap-1.5"
+                  title="Pay cash or UPI at the counter"
+                >
+                  Pay at Counter
+                </button>
 
                 <button
                   type="button"

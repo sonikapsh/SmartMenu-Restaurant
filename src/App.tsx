@@ -30,7 +30,8 @@ import {
   Coffee,
   Shield,
   Layers,
-  LogOut
+  LogOut,
+  CreditCard
 } from "lucide-react";
 import { menuData } from "./menuData";
 import { MenuItem, CartItem, Order, Reservation, DiningSession, DiningTable, UserRole } from "./types";
@@ -122,7 +123,7 @@ export default function App() {
   // Cart & Ordering States
   const [cart, setCart] = useState<CartItem[]>([]);
   const [isCartOpen, setIsCartOpen] = useState<boolean>(false);
-  const [orderType, setOrderType] = useState<"dine_in" | "delivery">("dine_in");
+  const [orderType, setOrderType] = useState<"dine_in" | "delivery">("delivery");
   const [tableNumber, setTableNumber] = useState<string>("");
   const [deliveryAddress, setDeliveryAddress] = useState<string>("");
   const [activeTableLabel, setActiveTableLabel] = useState<string>("");
@@ -156,7 +157,7 @@ export default function App() {
   // Modal flow
   const [showSummaryModal, setShowSummaryModal] = useState<boolean>(false);
   const [showPaymentModal, setShowPaymentModal] = useState<boolean>(false);
-  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<string>("pay_at_counter");
+  const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<string>("upi");
   const [showPlacedModal, setShowPlacedModal] = useState<boolean>(false);
   const [placedOrderData, setPlacedOrderData] = useState<{
     orderId: string;
@@ -183,6 +184,8 @@ export default function App() {
   const [allReservations, setAllReservations] = useState<Reservation[]>([]);
   const [toastMessage, setToastMessage] = useState<string>("");
   const [selectedBillOrder, setSelectedBillOrder] = useState<Order | null>(null);
+  const [isPayingOrder, setIsPayingOrder] = useState<boolean>(false);
+  const [delishClubEmail, setDelishClubEmail] = useState<string>("");
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState<boolean>(false);
   const [customerSessionId, setCustomerSessionId] = useState<string>(() => getCustomerSessionId());
   const [userOrderIds, setUserOrderIds] = useState<string[]>([]);
@@ -315,20 +318,14 @@ export default function App() {
           if (savedSess) setCurrentDiningSessionId(savedSess);
         }
       } else {
-        // Normal non-QR walk-in customer
-        const saved = localStorage.getItem(`delish_table_${sid}`);
-        if (saved) {
-          const parsedSaved = parseInt(saved, 10);
-          if (!isNaN(parsedSaved) && parsedSaved >= 1 && parsedSaved <= TOTAL_TABLES) {
-            setTableNumber(String(parsedSaved));
-            setActiveTableLabel(String(parsedSaved));
-            setOrderType("dine_in");
-          } else {
-            localStorage.removeItem(`delish_table_${sid}`);
-            setTableNumber("");
-            setActiveTableLabel("");
-          }
-        }
+        // Direct customer access outside restaurant: strictly Delivery only
+        localStorage.removeItem(`delish_table_${sid}`);
+        sessionStorage.removeItem("delish_qr_table_locked");
+        setTableNumber("");
+        setActiveTableLabel("");
+        setIsQrLocked(false);
+        setQrLockedTable("");
+        setOrderType("delivery");
       }
     }
 
@@ -450,13 +447,17 @@ export default function App() {
           const orders: Order[] = [];
           snapshot.forEach((docSnap) => {
             const data = docSnap.data();
-            // Match customerSessionId, currentDiningSessionId, or userOrderIds
+            // Match customerSessionId, currentDiningSessionId, activeTableLabel, or userOrderIds
             if (
               data.sessionId === customerSessionId ||
               (currentDiningSessionId && data.sessionId === currentDiningSessionId) ||
+              (activeTableLabel && data.tableNumber === activeTableLabel && data.orderType === "dine_in") ||
               userOrderIds.includes(docSnap.id)
             ) {
-              orders.push({ id: docSnap.id, ...data } as Order);
+              const fullOrder = { id: docSnap.id, ...data } as Order;
+              orders.push(fullOrder);
+              // Live update selectedBillOrder if currently being viewed
+              setSelectedBillOrder((prev) => (prev?.id === docSnap.id ? fullOrder : prev));
             }
           });
           orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
@@ -523,6 +524,22 @@ export default function App() {
     }, 2500);
   };
 
+  const handleJoinDelishClub = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const email = delishClubEmail.trim();
+    if (!email) {
+      showToast("Please enter your email address.");
+      return;
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      showToast("Please enter a valid email address.");
+      return;
+    }
+    showToast("Subscribed to Delish Club perks successfully!");
+    setDelishClubEmail("");
+  };
+
   // Cart operations (Direct item addition)
   const handleAddToCart = (item: MenuItem) => {
     setCart((prev) => {
@@ -558,6 +575,18 @@ export default function App() {
 
   const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const cartItemCount = cart.reduce((sum, item) => sum + item.quantity, 0);
+
+  // Active table orders and calculated running total
+  const activeTableOrders = allOrders.filter(
+    (o) =>
+      o.status !== "Cancelled" &&
+      ((currentDiningSessionId && o.sessionId === currentDiningSessionId) ||
+        (activeTableLabel && o.tableNumber === activeTableLabel && o.orderType === "dine_in"))
+  );
+  const activeTableTotal =
+    activeTableOrders.length > 0
+      ? activeTableOrders.reduce((sum, o) => sum + (Number(o.total) || 0), 0)
+      : sessionRunningTotal;
 
   // Set table number with strict validation (Tables 1 to 10 only) and session persistence
   const handleSetTable = (targetTable?: string) => {
@@ -675,9 +704,15 @@ export default function App() {
       return;
     }
     if (orderType === "dine_in") {
-      const num = parseInt(activeTableLabel, 10);
-      if (!activeTableLabel || isNaN(num) || num < 1 || num > TOTAL_TABLES) {
-        showToast(`Please select a valid table (Tables 1 to ${TOTAL_TABLES}) first!`);
+      if (!isQrLocked) {
+        showToast("Dine-in is only available by scanning a table QR code.");
+        setOrderType("delivery");
+        return;
+      }
+      const targetT = qrLockedTable || activeTableLabel;
+      const num = parseInt(targetT, 10);
+      if (!targetT || isNaN(num) || num < 1 || num > TOTAL_TABLES) {
+        showToast("Invalid table QR code detected.");
         return;
       }
       // DINE-IN: Direct dispatch to kitchen without upfront payment!
@@ -695,6 +730,15 @@ export default function App() {
 
   const proceedToPayment = () => {
     setShowSummaryModal(false);
+    if (orderType === "delivery") {
+      if (selectedPaymentMethod !== "upi" && selectedPaymentMethod !== "cod") {
+        setSelectedPaymentMethod("upi");
+      }
+    } else {
+      if (selectedPaymentMethod !== "upi" && selectedPaymentMethod !== "pay_at_counter" && selectedPaymentMethod !== "card") {
+        setSelectedPaymentMethod("upi");
+      }
+    }
     setShowPaymentModal(true);
   };
 
@@ -717,8 +761,8 @@ export default function App() {
     setIsSubmittingOrder(true);
 
     const idempotencyKey = "req_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
-    const targetTable = isQrLocked ? qrLockedTable : activeTableLabel;
-    const targetOrderType = isQrLocked ? "dine_in" : orderType;
+    const targetTable = isQrLocked ? (qrLockedTable || activeTableLabel) : "Delivery";
+    const targetOrderType = isQrLocked ? "dine_in" : "delivery";
 
     const orderPayload = {
       idempotencyKey,
@@ -826,6 +870,11 @@ export default function App() {
   };
 
   const handleConfirmOrder = async () => {
+    if (selectedPaymentMethod === "cod") {
+      await submitOrderToBackend("Cash on Delivery", "COD_" + Date.now());
+      return;
+    }
+
     if (selectedPaymentMethod === "pay_at_counter") {
       await submitOrderToBackend("Cash at Counter", "COUNTER_CASH");
       return;
@@ -908,6 +957,182 @@ export default function App() {
     } catch (err: any) {
       showToast("Payment initialization failed.");
       console.error(err);
+    }
+  };
+
+  const handlePaySelectedBillOrder = async () => {
+    if (!selectedBillOrder || selectedBillOrder.total <= 0 || isPayingOrder) return;
+    setIsPayingOrder(true);
+
+    try {
+      if (selectedPaymentMethod === "cod") {
+        const codPayId = "COD_" + Date.now();
+        const verifyRes = await fetch("/api/payment/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            razorpay_payment_id: codPayId,
+            orderId: selectedBillOrder.id,
+            sessionId: selectedBillOrder.sessionId,
+            tableNumber: selectedBillOrder.tableNumber
+          })
+        });
+        const verifyData = await verifyRes.json();
+        if (verifyRes.ok && verifyData.success) {
+          const updated: Order = {
+            ...selectedBillOrder,
+            paymentStatus: "paid",
+            paymentMethod: "Cash on Delivery",
+            paymentId: codPayId
+          };
+          setSelectedBillOrder(updated);
+          setAllOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+          showToast("Settled with Cash on Delivery!");
+        } else {
+          showToast("Could not register payment status.");
+        }
+        return;
+      }
+
+      if (selectedPaymentMethod === "pay_at_counter") {
+        const counterPayId = "COUNTER_" + Date.now();
+        const verifyRes = await fetch("/api/payment/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            razorpay_payment_id: counterPayId,
+            orderId: selectedBillOrder.id,
+            sessionId: selectedBillOrder.sessionId,
+            tableNumber: selectedBillOrder.tableNumber
+          })
+        });
+        const verifyData = await verifyRes.json();
+        if (verifyRes.ok && verifyData.success) {
+          const updated: Order = {
+            ...selectedBillOrder,
+            paymentStatus: "paid",
+            paymentMethod: "Cash at Counter",
+            paymentId: counterPayId
+          };
+          setSelectedBillOrder(updated);
+          setAllOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+          showToast("Bill settled at counter successfully!");
+        } else {
+          showToast("Could not register counter payment.");
+        }
+        return;
+      }
+
+      // Online Razorpay Payment
+      showToast("Starting payment gateway...");
+      const isLoaded = await loadRazorpayScript();
+      if (!isLoaded) {
+        showToast("Could not load payment gateway client.");
+        return;
+      }
+
+      const createRes = await fetch("/api/payment/create-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          amount: selectedBillOrder.total,
+          orderId: selectedBillOrder.id,
+          sessionId: selectedBillOrder.sessionId
+        })
+      });
+
+      const orderData = await createRes.json();
+      if (!createRes.ok || !orderData.success) {
+        showToast("Payment setup error: " + (orderData.error || "Failed to create order."));
+        return;
+      }
+
+      if (orderData.simulated) {
+        const payId = "PAY_SIM_" + Math.random().toString(36).substring(2, 9).toUpperCase();
+        const verifyRes = await fetch("/api/payment/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            razorpay_order_id: orderData.order_id,
+            razorpay_payment_id: payId,
+            razorpay_signature: "simulated_signature",
+            orderId: selectedBillOrder.id,
+            sessionId: selectedBillOrder.sessionId,
+            tableNumber: selectedBillOrder.tableNumber
+          })
+        });
+        const verifyData = await verifyRes.json();
+        if (verifyData.success) {
+          const updated: Order = {
+            ...selectedBillOrder,
+            paymentStatus: "paid",
+            paymentMethod: `Razorpay (${selectedPaymentMethod.toUpperCase()})`,
+            paymentId: payId
+          };
+          setSelectedBillOrder(updated);
+          setAllOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+          showToast("Payment verified! Bill paid successfully.");
+        }
+        return;
+      }
+
+      const options = {
+        key: orderData.key_id,
+        amount: orderData.amount,
+        currency: "INR",
+        name: "Delish Cafe",
+        description: `Delish Cafe Bill - ${selectedBillOrder.id}`,
+        order_id: orderData.order_id,
+        handler: async (resp: any) => {
+          try {
+            const payId = resp.razorpay_payment_id || "PAY_SIM_" + Math.random().toString(36).substring(2, 9).toUpperCase();
+            const verifyRes = await fetch("/api/payment/verify", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                razorpay_order_id: resp.razorpay_order_id,
+                razorpay_payment_id: payId,
+                razorpay_signature: resp.razorpay_signature,
+                orderId: selectedBillOrder.id,
+                sessionId: selectedBillOrder.sessionId,
+                tableNumber: selectedBillOrder.tableNumber
+              })
+            });
+            const verifyData = await verifyRes.json();
+            if (verifyRes.ok && verifyData.success) {
+              const updated: Order = {
+                ...selectedBillOrder,
+                paymentStatus: "paid",
+                paymentMethod: `Razorpay (${selectedPaymentMethod.toUpperCase()})`,
+                paymentId: payId
+              };
+              setSelectedBillOrder(updated);
+              setAllOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
+              showToast("Payment verified! Bill paid successfully.");
+            }
+          } catch (vErr) {
+            console.warn(vErr);
+          }
+        },
+        prefill: {
+          name: "Delish Customer",
+          email: "customer@delishcafe.com",
+          contact: "9876543210"
+        },
+        theme: {
+          color: "#3E4B2F"
+        }
+      };
+
+      const rzp = new (window as any).Razorpay(options);
+      rzp.on("payment.failed", (resp: any) => {
+        showToast("Payment unsuccessful: " + resp.error.description);
+      });
+      rzp.open();
+    } catch (err: any) {
+      showToast("Payment failed: " + (err as any)?.message);
+    } finally {
+      setIsPayingOrder(false);
     }
   };
 
@@ -1245,17 +1470,39 @@ export default function App() {
 
       {/* ================= HEADER NAVBAR ================= */}
       <header className="fixed top-0 left-0 right-0 z-40 bg-[#FAF8F3]/95 backdrop-blur-md border-b border-[#C9A84E]/20 shadow-sm transition-all duration-300">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
-          <div className="flex items-center gap-3 cursor-pointer group" onClick={handleGoHome}>
-            <DelishLogo className="w-12 h-12 shrink-0 group-hover:scale-105 transition-transform shadow-md" />
-            <div className="flex flex-col">
-              <span className="text-2xl sm:text-3xl font-serif font-black tracking-tight uppercase text-[#3E4B2F] leading-none group-hover:text-[#26301C] transition-colors">
-                DELISH
-              </span>
-              <span className="text-[9px] font-bold tracking-widest uppercase text-[#C9A84E] mt-0.5">
-                CAFE &bull; AHMEDABAD
-              </span>
+        <div
+          className={`max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 ${
+            isAdminMode
+              ? "py-2.5 sm:py-0 sm:h-20 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 sm:gap-4"
+              : "h-20 flex items-center justify-between"
+          }`}
+        >
+          {/* Logo & Brand (with mobile Sign Out in Admin Mode) */}
+          <div className="flex items-center justify-between w-full sm:w-auto">
+            <div className="flex items-center gap-2.5 sm:gap-3 cursor-pointer group shrink-0" onClick={handleGoHome}>
+              <DelishLogo className="w-9 h-9 sm:w-11 sm:h-11 shrink-0 group-hover:scale-105 transition-transform shadow-md" />
+              <div className="flex flex-col">
+                <span className="text-xl sm:text-2xl lg:text-3xl font-serif font-black tracking-tight uppercase text-[#3E4B2F] leading-none group-hover:text-[#26301C] transition-colors">
+                  DELISH
+                </span>
+                <span className="text-[8px] sm:text-[9px] font-bold tracking-widest uppercase text-[#C9A84E] mt-0.5">
+                  CAFE &bull; AHMEDABAD
+                </span>
+              </div>
             </div>
+
+            {/* Mobile Sign Out Button (Row 1) */}
+            {isAdminMode && (
+              <button
+                type="button"
+                onClick={handleAdminLogout}
+                className="sm:hidden bg-[#3E4B2F] hover:bg-rose-900 text-white px-2.5 py-1.5 rounded-xl font-bold uppercase tracking-widest text-[9px] transition-all flex items-center gap-1.5 shadow-sm hover:shadow cursor-pointer border border-[#C9A84E]/40 shrink-0 whitespace-nowrap active:scale-95"
+                title="Sign out of portal"
+              >
+                <LogOut className="w-3.5 h-3.5 shrink-0" />
+                <span>Sign Out</span>
+              </button>
+            )}
           </div>
 
           {/* Nav links (hidden in admin mode) */}
@@ -1273,43 +1520,56 @@ export default function App() {
                 My Orders
               </button>
             </nav>
-          ) : (
-            <div className="flex items-center gap-2 text-[10px] uppercase border border-[#C9A84E]/40 text-[#3E4B2F] bg-[#C9A84E]/15 font-bold px-3.5 py-1.5 rounded-full tracking-wider">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#3E4B2F] animate-pulse"></span>
-              <span>
-                {currentUserRole === "OWNER"
-                  ? "👑 Owner Portal"
-                  : currentUserRole === "KITCHEN"
-                  ? "🍳 Kitchen Dispatch"
-                  : currentUserRole === "STAFF"
-                  ? "📋 Floor Staff"
-                  : currentUserRole === "MANAGER"
-                  ? "👔 Manager Portal"
-                  : "Portal Active"}
-              </span>
-            </div>
-          )}
+          ) : null}
 
-          <div className="flex items-center gap-2 sm:gap-3">
+          <div className={`flex items-center ${isAdminMode ? "w-full sm:w-auto gap-2 sm:gap-2.5" : "gap-2 sm:gap-3"}`}>
             {isAdminMode ? (
-              <div className="flex items-center gap-2">
+              <>
+                {/* OWNER PORTAL Navigation Button */}
                 <button
+                  type="button"
+                  onClick={() => {
+                    window.scrollTo({ top: 0, behavior: "smooth" });
+                  }}
+                  className="flex-1 sm:flex-none justify-center flex items-center gap-1.5 text-[10px] uppercase border border-[#C9A84E]/40 text-[#3E4B2F] bg-[#C9A84E]/15 hover:bg-[#C9A84E]/25 font-bold px-3 sm:px-3.5 py-2 rounded-xl tracking-wider shadow-sm shrink-0 whitespace-nowrap cursor-pointer transition-all active:scale-95"
+                  title="Owner Portal Dashboard (Scroll to top)"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#3E4B2F] animate-pulse shrink-0"></span>
+                  <span className="font-bold">
+                    {currentUserRole === "OWNER"
+                      ? "👑 Owner Portal"
+                      : currentUserRole === "KITCHEN"
+                      ? "🍳 Kitchen Dispatch"
+                      : currentUserRole === "STAFF"
+                      ? "📋 Floor Staff"
+                      : currentUserRole === "MANAGER"
+                      ? "👔 Manager Portal"
+                      : "Portal Active"}
+                  </span>
+                </button>
+
+                {/* ← CUSTOMER Navigation Button */}
+                <button
+                  type="button"
                   onClick={() => setIsAdminMode(false)}
-                  className="bg-white hover:bg-[#F4EFE6] text-[#3E4B2F] border border-[#C9A84E]/40 px-3.5 py-2 rounded-xl font-bold uppercase tracking-widest text-[10px] transition-all flex items-center gap-1.5 shadow-sm cursor-pointer"
+                  className="flex-1 sm:flex-none justify-center bg-white hover:bg-[#F4EFE6] text-[#3E4B2F] border border-[#C9A84E]/40 px-3 sm:px-3.5 py-2 rounded-xl font-bold uppercase tracking-widest text-[10px] transition-all flex items-center gap-1.5 shadow-sm hover:shadow cursor-pointer shrink-0 whitespace-nowrap active:scale-95"
                   title="Switch to Customer view without signing out"
                 >
-                  <ArrowLeft className="w-3.5 h-3.5" />
-                  Customer
+                  <ArrowLeft className="w-3.5 h-3.5 text-[#C9A84E] shrink-0" />
+                  <span>Customer</span>
                 </button>
+
+                {/* Desktop Sign Out Button */}
                 <button
+                  type="button"
                   onClick={handleAdminLogout}
-                  className="bg-[#3E4B2F] hover:bg-rose-900 text-white px-3.5 py-2 rounded-xl font-bold uppercase tracking-widest text-[10px] transition-all flex items-center gap-1.5 shadow-sm cursor-pointer border border-[#C9A84E]/40"
+                  className="hidden sm:flex bg-[#3E4B2F] hover:bg-rose-900 text-white px-3.5 py-2 rounded-xl font-bold uppercase tracking-widest text-[10px] transition-all items-center gap-1.5 shadow-sm hover:shadow cursor-pointer border border-[#C9A84E]/40 shrink-0 whitespace-nowrap active:scale-95"
                   title="Sign out of portal"
                 >
-                  <LogOut className="w-3.5 h-3.5" />
-                  Sign Out
+                  <LogOut className="w-3.5 h-3.5 shrink-0" />
+                  <span>Sign Out</span>
                 </button>
-              </div>
+              </>
             ) : (
               <button
                 onClick={() => setShowAdminLogin(true)}
@@ -1515,7 +1775,7 @@ export default function App() {
       </AnimatePresence>
 
       {/* ================= PRIMARY VIEWS ================= */}
-      <div className="pt-16 sm:pt-20">
+      <div className={isAdminMode ? "pt-28 sm:pt-20" : "pt-16 sm:pt-20"}>
         {!isAdminMode ? (
         // ================= CUSTOMER PORTAL =================
         <>
@@ -1641,14 +1901,29 @@ export default function App() {
               </p>
             </div>
 
-            {/* Dine-In Indicator (Non-intrusive for table diners) */}
-            {activeTableLabel && orderType === "dine_in" && (
-              <div className="mb-8 flex justify-center">
+            {/* Dine-In Indicator & Total Bill (Keeps existing table indicator exactly as it is for QR diners) */}
+            {isQrLocked && activeTableLabel && orderType === "dine_in" && (
+              <div className="mb-8 flex flex-wrap items-center justify-center gap-3">
                 <div className="inline-flex items-center gap-2.5 bg-white text-[#3E4B2F] border border-[#C9A84E]/40 px-5 py-2.5 rounded-full shadow-sm text-xs font-bold uppercase tracking-wider">
                   <span className="text-base leading-none">🍽️</span>
                   <span>Dine-In &bull; Table {activeTableLabel}</span>
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse ml-1" />
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowSessionBillModal(true)}
+                  className="inline-flex items-center gap-2 bg-[#3E4B2F] hover:bg-[#323E25] text-white px-5 py-2.5 rounded-full shadow-md text-xs font-bold uppercase tracking-wider transition-all hover:scale-105 active:scale-95 cursor-pointer border border-[#C9A84E]/40"
+                  title="View current table total bill and payment options"
+                >
+                  <Receipt className="w-3.5 h-3.5 text-[#C9A84E]" />
+                  <span>TOTAL BILL</span>
+                  {activeTableTotal > 0 && (
+                    <span className="ml-0.5 px-2 py-0.5 rounded-full bg-white/20 text-[10px] font-mono font-bold text-white">
+                      ₹{activeTableTotal}
+                    </span>
+                  )}
+                </button>
               </div>
             )}
 
@@ -1979,27 +2254,41 @@ export default function App() {
                   className="relative w-full max-w-3xl bg-[#FAF8F3] rounded-[2rem] shadow-2xl border border-[#C9A84E]/35 overflow-hidden z-10 my-6 max-h-[92vh] flex flex-col"
                 >
                   {/* Modal Header */}
-                  <div className="p-5 sm:p-6 bg-white border-b border-[#C9A84E]/20 flex items-center justify-between shrink-0">
-                    <div className="flex items-center gap-3">
-                      <div className="w-11 h-11 rounded-full bg-[#FAF8F3] border border-[#C9A84E]/40 flex items-center justify-center text-[#3E4B2F] shadow-sm">
-                        <Calendar className="w-5 h-5 text-[#C9A84E]" />
+                  <div className="p-4 sm:p-6 bg-white border-b border-[#C9A84E]/20 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 sm:gap-4 shrink-0">
+                    {/* Title Row with mobile Close button */}
+                    <div className="flex items-center justify-between gap-3 w-full sm:w-auto">
+                      <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+                        <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-full bg-[#FAF8F3] border border-[#C9A84E]/40 flex items-center justify-center text-[#3E4B2F] shadow-sm shrink-0">
+                          <Calendar className="w-4 h-4 sm:w-5 sm:h-5 text-[#C9A84E]" />
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="text-lg sm:text-2xl font-serif font-black uppercase tracking-tight text-[#26301C] truncate sm:whitespace-normal">
+                            {editReservationId ? "Modify Reservation" : "Table Reservation"}
+                          </h3>
+                          <p className="text-[9px] sm:text-xs text-[#52633E] uppercase font-bold tracking-widest mt-0.5 truncate sm:whitespace-normal">
+                            Delish Cafe &bull; Live Table Availability
+                          </p>
+                        </div>
                       </div>
-                      <div>
-                        <h3 className="text-xl sm:text-2xl font-serif font-black uppercase tracking-tight text-[#26301C]">
-                          {editReservationId ? "Modify Reservation" : "Table Reservation"}
-                        </h3>
-                        <p className="text-[10px] sm:text-xs text-[#52633E] uppercase font-bold tracking-widest mt-0.5">
-                          Delish Cafe &bull; Live Table Availability
-                        </p>
-                      </div>
+
+                      {/* Mobile Close Button */}
+                      <button
+                        type="button"
+                        onClick={() => setIsReservationModalOpen(false)}
+                        className="sm:hidden w-8 h-8 rounded-full bg-[#FAF8F3] hover:bg-[#F4EFE6] border border-[#C9A84E]/30 flex items-center justify-center text-[#52633E] hover:text-[#26301C] transition-colors cursor-pointer shrink-0"
+                        title="Close"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
                     </div>
 
-                    <div className="flex items-center gap-2 sm:gap-3">
-                      <div className="flex bg-[#FAF8F3] p-1 rounded-xl border border-[#C9A84E]/30">
+                    {/* Tabs row on mobile / inline on desktop */}
+                    <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto">
+                      <div className="flex bg-[#FAF8F3] p-1 rounded-xl border border-[#C9A84E]/30 w-full sm:w-auto">
                         <button
                           type="button"
                           onClick={() => setActiveReservationTab("book")}
-                          className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer ${
+                          className={`flex-1 sm:flex-none text-center px-3.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all cursor-pointer whitespace-nowrap ${
                             activeReservationTab === "book"
                               ? "bg-[#3E4B2F] text-white shadow-sm"
                               : "text-[#52633E] hover:text-[#26301C]"
@@ -2010,7 +2299,7 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => setActiveReservationTab("manage")}
-                          className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center gap-1.5 cursor-pointer ${
+                          className={`flex-1 sm:flex-none justify-center px-3.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
                             activeReservationTab === "manage"
                               ? "bg-[#3E4B2F] text-white shadow-sm"
                               : "text-[#52633E] hover:text-[#26301C]"
@@ -2025,10 +2314,11 @@ export default function App() {
                         </button>
                       </div>
 
+                      {/* Desktop Close Button */}
                       <button
                         type="button"
                         onClick={() => setIsReservationModalOpen(false)}
-                        className="w-9 h-9 rounded-full bg-[#FAF8F3] hover:bg-[#F4EFE6] border border-[#C9A84E]/30 flex items-center justify-center text-[#52633E] hover:text-[#26301C] transition-colors cursor-pointer"
+                        className="hidden sm:flex w-9 h-9 rounded-full bg-[#FAF8F3] hover:bg-[#F4EFE6] border border-[#C9A84E]/30 items-center justify-center text-[#52633E] hover:text-[#26301C] transition-colors cursor-pointer shrink-0"
                         title="Close"
                       >
                         <X className="w-4 h-4" />
@@ -2544,17 +2834,21 @@ export default function App() {
                     <p className="text-[10px] text-[#52633E] leading-relaxed font-bold uppercase tracking-wider">
                       Subscribe to receive weekly member perks, complimentary brew passes, and chef's special invites!
                     </p>
-                    <input
-                      type="email"
-                      placeholder="Enter your email"
-                      className="w-full px-4 py-3 bg-white border border-[#C9A84E]/30 rounded-xl focus:outline-none focus:border-[#3E4B2F] text-xs text-[#26301C] font-bold uppercase tracking-wider"
-                    />
-                    <button
-                      onClick={() => showToast("Subscribed to Delish Club perks successfully!")}
-                      className="w-full bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest py-3 rounded-xl text-[10px] transition-all cursor-pointer shadow-sm border border-[#C9A84E]/30"
-                    >
-                      Join Delish Club
-                    </button>
+                    <form onSubmit={handleJoinDelishClub} className="space-y-4">
+                      <input
+                        type="email"
+                        value={delishClubEmail}
+                        onChange={(e) => setDelishClubEmail(e.target.value)}
+                        placeholder="Enter your email"
+                        className="w-full px-4 py-3 bg-white border border-[#C9A84E]/30 rounded-xl focus:outline-none focus:border-[#3E4B2F] text-xs text-[#26301C] font-bold uppercase tracking-wider"
+                      />
+                      <button
+                        type="submit"
+                        className="w-full bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest py-3 rounded-xl text-[10px] transition-all cursor-pointer shadow-sm border border-[#C9A84E]/30"
+                      >
+                        Join Delish Club
+                      </button>
+                    </form>
                   </div>
                 </div>
               </div>
@@ -3240,12 +3534,18 @@ export default function App() {
 
                           <div className="flex items-center justify-between pt-2.5 border-t border-[#C9A84E]/20 mt-2.5">
                             <span className="text-sm font-serif font-bold text-[#26301C]">Total: ₹{order.total}</span>
-                            <button
-                              onClick={() => setSelectedBillOrder(order)}
-                              className="bg-white hover:bg-[#FAF8F3] text-[#3E4B2F] border border-[#C9A84E]/30 font-bold uppercase tracking-widest text-[9px] px-3 py-1.5 rounded-xl transition-all flex items-center gap-1 shadow-sm"
-                            >
-                              <Receipt className="w-3.5 h-3.5 text-[#C9A84E]" /> View Bill
-                            </button>
+                            {order.status?.toLowerCase() === "completed" ? (
+                              <button
+                                onClick={() => setSelectedBillOrder(order)}
+                                className="bg-[#3E4B2F] hover:bg-[#323E25] text-white border border-[#C9A84E]/30 font-bold uppercase tracking-widest text-[9px] px-3.5 py-1.5 rounded-xl transition-all flex items-center gap-1.5 shadow-sm hover:scale-105 active:scale-95 cursor-pointer"
+                              >
+                                <Receipt className="w-3.5 h-3.5 text-[#C9A84E]" /> TOTAL BILL
+                              </button>
+                            ) : (
+                              <span className="text-[9px] uppercase tracking-wider font-semibold text-[#52633E] italic">
+                                In Kitchen &bull; Bill on completion
+                              </span>
+                            )}
                           </div>
                         </div>
                       );
@@ -3343,95 +3643,17 @@ export default function App() {
                   <span className="font-serif text-sm">Grand Total Amount</span>
                   <span className="text-2xl text-[#3E4B2F] font-serif font-black italic">₹{cartTotal}</span>
                 </div>
-                {/* Dining Option & Table Selector */}
-                <div className="bg-white rounded-xl p-3 border border-[#C9A84E]/30 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#52633E]">Dining Preference:</span>
-                    <div className="flex gap-1">
-                      <button
-                        type="button"
-                        onClick={() => setOrderType("dine_in")}
-                        className={`px-2.5 py-1 rounded-lg text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer ${
-                          orderType === "dine_in"
-                            ? "bg-[#3E4B2F] text-white"
-                            : "bg-[#FAF8F3] text-[#52633E] hover:bg-[#F4EFE6]"
-                        }`}
-                      >
-                        🪑 Dine-In
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setOrderType("delivery")}
-                        className={`px-2.5 py-1 rounded-lg text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer ${
-                          orderType === "delivery"
-                            ? "bg-[#3E4B2F] text-white"
-                            : "bg-[#FAF8F3] text-[#52633E] hover:bg-[#F4EFE6]"
-                        }`}
-                      >
-                        🏠 Delivery
-                      </button>
+                {/* Dining Option: Direct Access = Delivery Only | Valid QR Access = Dine-in Table */}
+                {!isQrLocked ? (
+                  <div className="bg-white rounded-xl p-3.5 border border-[#C9A84E]/30 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#52633E]">Dining Option:</span>
+                      <span className="px-2.5 py-1 rounded-lg text-[9px] font-bold bg-[#3E4B2F] text-white uppercase tracking-wider flex items-center gap-1 shadow-sm">
+                        <span>🏠</span> Delivery
+                      </span>
                     </div>
-                  </div>
 
-                  {orderType === "dine_in" ? (
-                    <div className="space-y-1.5 pt-1">
-                      {isQrLocked ? (
-                        <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between text-xs text-amber-900 font-bold">
-                          <span className="flex items-center gap-1.5">
-                            <span className="text-sm">🔒</span> Table {qrLockedTable} Locked via QR
-                          </span>
-                          <span className="text-[9px] bg-amber-200/80 text-amber-900 px-2 py-0.5 rounded-full uppercase tracking-wider font-bold">
-                            Verified Table
-                          </span>
-                        </div>
-                      ) : (
-                        <>
-                          <div className="flex items-center justify-between text-[9px] font-bold uppercase tracking-wider text-[#52633E]">
-                            <span>Select Table (1 to {TOTAL_TABLES}):</span>
-                            <span className="text-[#3E4B2F] font-bold">
-                              {activeTableLabel ? `Table ${activeTableLabel}` : "No Table Selected"}
-                            </span>
-                          </div>
-                          <div className="grid grid-cols-5 gap-1.5">
-                            {Array.from({ length: TOTAL_TABLES }, (_, idx) => {
-                              const numStr = String(idx + 1);
-                              const isSelected = activeTableLabel === numStr;
-                              const tableObj = allTables.find((t) => t.tableNumber === numStr);
-                              const isOccupiedByOther = tableObj?.status === "occupied" && tableObj.activeSessionId !== currentDiningSessionId;
-
-                              return (
-                                <button
-                                  key={numStr}
-                                  type="button"
-                                  onClick={() => {
-                                    if (isOccupiedByOther) {
-                                      showToast(`Table ${numStr} is currently occupied by another dining guest.`);
-                                      return;
-                                    }
-                                    handleSetTable(numStr);
-                                  }}
-                                  className={`relative py-1.5 text-center font-bold text-xs rounded-lg transition-all border cursor-pointer ${
-                                    isSelected
-                                      ? "bg-[#3E4B2F] text-white border-[#3E4B2F] shadow-sm"
-                                      : isOccupiedByOther
-                                      ? "bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed"
-                                      : "bg-[#FAF8F3] text-[#26301C] border-[#C9A84E]/30 hover:border-[#3E4B2F]"
-                                  }`}
-                                  title={isOccupiedByOther ? `Table ${numStr} is currently occupied` : `Table ${numStr}`}
-                                >
-                                  {numStr}
-                                  {isOccupiedByOther && !isSelected && (
-                                    <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-rose-500" />
-                                  )}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="space-y-1 pt-1">
+                    <div className="space-y-1.5 pt-1 border-t border-stone-100">
                       <label className="text-[9px] font-bold uppercase tracking-wider text-[#52633E] block">
                         Ahmedabad Delivery Address:
                       </label>
@@ -3443,8 +3665,26 @@ export default function App() {
                         className="w-full px-3 py-2 text-xs border border-[#C9A84E]/30 rounded-lg bg-[#FAF8F3] font-bold text-[#26301C] focus:outline-none focus:border-[#3E4B2F]"
                       />
                     </div>
-                  )}
-                </div>
+                  </div>
+                ) : (
+                  <div className="bg-white rounded-xl p-3.5 border border-[#C9A84E]/30 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#52633E]">Dining Preference:</span>
+                      <span className="px-2.5 py-1 rounded-lg text-[9px] font-bold bg-[#3E4B2F] text-white uppercase tracking-wider flex items-center gap-1 shadow-sm">
+                        <span>🪑</span> Dine-In
+                      </span>
+                    </div>
+
+                    <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between text-xs text-amber-900 font-bold">
+                      <span className="flex items-center gap-1.5">
+                        <span className="text-sm">🔒</span> Table {qrLockedTable || activeTableLabel} Locked via QR
+                      </span>
+                      <span className="text-[9px] bg-amber-200/80 text-amber-900 px-2 py-0.5 rounded-full uppercase tracking-wider font-bold">
+                        Verified Table
+                      </span>
+                    </div>
+                  </div>
+                )}
 
                 <button
                   onClick={handlePlaceOrderClick}
@@ -3551,55 +3791,82 @@ export default function App() {
               </button>
               <div className="mb-6">
                 <h2 className="text-2xl font-serif font-bold uppercase tracking-tight text-[#26301C]">Select Payment Method</h2>
-                <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">UPI, Credit/Debit Card, Net Banking, and Pay at Counter are available.</p>
+                <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">
+                  {orderType === "delivery"
+                    ? "UPI and Cash on Delivery are available for doorstep delivery."
+                    : "UPI, Pay at Counter, and Credit/Debit Card are available."}
+                </p>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <button
-                  onClick={() => setSelectedPaymentMethod("upi")}
-                  className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
-                    selectedPaymentMethod === "upi"
-                      ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm"
-                      : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
-                  }`}
-                >
-                  <span className="text-2xl">📱</span>
-                  <span className="text-[10px] font-bold">BHIM / UPI</span>
-                </button>
-                <button
-                  onClick={() => setSelectedPaymentMethod("card")}
-                  className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
-                    selectedPaymentMethod === "card"
-                      ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm"
-                      : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
-                  }`}
-                >
-                  <span className="text-2xl">💳</span>
-                  <span className="text-[10px] font-bold">Credit/Debit Card</span>
-                </button>
-                <button
-                  onClick={() => setSelectedPaymentMethod("netbanking")}
-                  className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
-                    selectedPaymentMethod === "netbanking"
-                      ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm"
-                      : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
-                  }`}
-                >
-                  <span className="text-2xl">🏦</span>
-                  <span className="text-[10px] font-bold">Net Banking</span>
-                </button>
-                <button
-                  onClick={() => setSelectedPaymentMethod("pay_at_counter")}
-                  className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
-                    selectedPaymentMethod === "pay_at_counter"
-                      ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm"
-                      : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
-                  }`}
-                >
-                  <span className="text-2xl">💰</span>
-                  <span className="text-[10px] font-bold">Pay at Counter</span>
-                </button>
-              </div>
+              {orderType === "delivery" ? (
+                /* DELIVERY: Show ONLY UPI and CASH ON DELIVERY */
+                <div className="grid grid-cols-2 gap-4">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPaymentMethod("upi")}
+                    className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
+                      selectedPaymentMethod === "upi"
+                        ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm ring-1 ring-[#3E4B2F]"
+                        : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
+                    }`}
+                  >
+                    <span className="text-2xl">📱</span>
+                    <span className="text-[10px] font-bold">BHIM / UPI</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPaymentMethod("cod")}
+                    className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
+                      selectedPaymentMethod === "cod"
+                        ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm ring-1 ring-[#3E4B2F]"
+                        : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
+                    }`}
+                  >
+                    <span className="text-2xl">💵</span>
+                    <span className="text-[10px] font-bold">Cash on Delivery</span>
+                  </button>
+                </div>
+              ) : (
+                /* QR-BASED DINE-IN: Show ONLY UPI, PAY AT COUNTER, Credit/Debit Card */
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPaymentMethod("upi")}
+                    className={`p-4 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
+                      selectedPaymentMethod === "upi"
+                        ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm ring-1 ring-[#3E4B2F]"
+                        : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
+                    }`}
+                  >
+                    <span className="text-2xl">📱</span>
+                    <span className="text-[10px] font-bold">BHIM / UPI</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPaymentMethod("pay_at_counter")}
+                    className={`p-4 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
+                      selectedPaymentMethod === "pay_at_counter"
+                        ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm ring-1 ring-[#3E4B2F]"
+                        : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
+                    }`}
+                  >
+                    <span className="text-2xl">💰</span>
+                    <span className="text-[10px] font-bold">Pay at Counter</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPaymentMethod("card")}
+                    className={`p-4 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
+                      selectedPaymentMethod === "card"
+                        ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm ring-1 ring-[#3E4B2F]"
+                        : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
+                    }`}
+                  >
+                    <span className="text-2xl">💳</span>
+                    <span className="text-[10px] font-bold">Credit/Debit Card</span>
+                  </button>
+                </div>
+              )}
 
               <div className="bg-[#FAF8F3] border border-[#C9A84E]/30 p-4 rounded-2xl mt-6 space-y-1.5 text-[10px] text-[#3E4B2F] font-bold uppercase tracking-wider">
                 <p className="flex items-center gap-1.5"><Clock className="w-3.5 h-3.5 text-[#C9A84E]" /> Razorpay Secured Checkout Enabled</p>
@@ -3615,9 +3882,16 @@ export default function App() {
                 </button>
                 <button
                   onClick={handleConfirmOrder}
-                  className="bg-[#3E4B2F] hover:bg-[#323E25] text-white px-6 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer shadow-md border border-[#C9A84E]/30"
+                  disabled={isSubmittingOrder}
+                  className="bg-[#3E4B2F] hover:bg-[#323E25] disabled:opacity-50 text-white px-6 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer shadow-md border border-[#C9A84E]/30"
                 >
-                  Confirm & Cook
+                  {isSubmittingOrder
+                    ? "Placing Order..."
+                    : selectedPaymentMethod === "cod"
+                    ? "Confirm Order (Cash on Delivery)"
+                    : selectedPaymentMethod === "pay_at_counter"
+                    ? "Confirm (Pay at Counter)"
+                    : `Pay ₹${cartTotal}`}
                 </button>
               </div>
             </motion.div>
@@ -3672,8 +3946,20 @@ export default function App() {
                     <p><span className="text-stone-400 font-bold">Service:</span> <span className="text-[#26301C] font-bold">{selectedBillOrder.orderType === "delivery" ? "Home Delivery" : `Table ${selectedBillOrder.tableNumber}`}</span></p>
                     <p>
                       <span className="text-stone-400 font-bold">Status:</span>{" "}
-                      <span className={`px-2 py-0.5 rounded text-[9px] font-bold ${selectedBillOrder.status === "Completed" ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-amber-50 text-amber-700 border border-amber-200"}`}>
-                        {selectedBillOrder.status === "Completed" ? "PAID & SETTLED" : selectedBillOrder.status.toUpperCase()}
+                      <span
+                        className={`px-2 py-0.5 rounded text-[9px] font-bold ${
+                          selectedBillOrder.status?.toLowerCase() === "completed"
+                            ? selectedBillOrder.paymentStatus === "paid"
+                              ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                              : "bg-blue-50 text-blue-700 border border-blue-200"
+                            : "bg-amber-50 text-amber-700 border border-amber-200"
+                        }`}
+                      >
+                        {selectedBillOrder.status?.toLowerCase() === "completed"
+                          ? selectedBillOrder.paymentStatus === "paid"
+                            ? "PAID & SETTLED"
+                            : "ORDER COMPLETED"
+                          : selectedBillOrder.status.toUpperCase()}
                       </span>
                     </p>
                   </div>
@@ -3714,34 +4000,145 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Payment meta details */}
-                <div className="bg-[#FAF8F3] border border-[#C9A84E]/20 p-4 rounded-2xl text-[9px] uppercase tracking-widest text-[#52633E] space-y-1">
-                  <p><span className="font-bold text-[#26301C]">Payment Mode:</span> {selectedBillOrder.paymentMethod ? selectedBillOrder.paymentMethod.replace("_", " ") : "CASH"}</p>
-                  {selectedBillOrder.paymentId && <p><span className="font-bold text-[#26301C]">Txn Ref ID:</span> <span className="font-mono">{selectedBillOrder.paymentId}</span></p>}
-                </div>
+                {/* Payment Meta Details / Interactive Payment Flow (Only when order is completed) */}
+                {selectedBillOrder.status?.toLowerCase() === "completed" ? (
+                  selectedBillOrder.paymentStatus === "paid" ? (
+                    <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl text-[9px] uppercase tracking-wider text-emerald-800 space-y-1.5">
+                      <div className="flex items-center gap-1.5 font-bold text-emerald-700 text-[10px]">
+                        <CheckCircle className="w-4 h-4 text-emerald-600" />
+                        <span>Payment Settled & Verified</span>
+                      </div>
+                      <p><span className="font-bold text-[#26301C]">Payment Mode:</span> {selectedBillOrder.paymentMethod ? selectedBillOrder.paymentMethod.replace("_", " ") : "ONLINE / COUNTER"}</p>
+                      {selectedBillOrder.paymentId && <p><span className="font-bold text-[#26301C]">Txn Ref ID:</span> <span className="font-mono">{selectedBillOrder.paymentId}</span></p>}
+                    </div>
+                  ) : (
+                    <div className="bg-[#FAF8F3] border-2 border-[#C9A84E]/40 p-4 rounded-2xl space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="text-xs font-serif font-bold uppercase tracking-wider text-[#26301C]">Payment Option</span>
+                          <p className="text-[9px] text-[#52633E] uppercase tracking-wider font-semibold">Total Payable: ₹{selectedBillOrder.total}</p>
+                        </div>
+                        <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-amber-50 text-amber-700 border border-amber-200 uppercase">
+                          Payment Pending
+                        </span>
+                      </div>
+
+                      {selectedBillOrder.orderType === "delivery" ? (
+                        /* DELIVERY: Show ONLY UPI and CASH ON DELIVERY */
+                        <div className="grid grid-cols-2 gap-2 text-center text-[10px] font-bold uppercase tracking-wider">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPaymentMethod("upi")}
+                            className={`p-2.5 rounded-xl border flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                              selectedPaymentMethod === "upi"
+                                ? "bg-[#3E4B2F] text-white border-[#3E4B2F] shadow-sm"
+                                : "bg-white text-[#52633E] border-stone-200 hover:border-[#C9A84E]"
+                            }`}
+                          >
+                            <span>📱</span>
+                            <span>UPI / QR</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPaymentMethod("cod")}
+                            className={`p-2.5 rounded-xl border flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                              selectedPaymentMethod === "cod"
+                                ? "bg-[#3E4B2F] text-white border-[#3E4B2F] shadow-sm"
+                                : "bg-white text-[#52633E] border-stone-200 hover:border-[#C9A84E]"
+                            }`}
+                          >
+                            <span>💵</span>
+                            <span>Cash on Delivery</span>
+                          </button>
+                        </div>
+                      ) : (
+                        /* QR-BASED DINE-IN: Show ONLY UPI, PAY AT COUNTER, Credit/Debit Card */
+                        <div className="grid grid-cols-3 gap-2 text-center text-[10px] font-bold uppercase tracking-wider">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPaymentMethod("upi")}
+                            className={`p-2.5 rounded-xl border flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                              selectedPaymentMethod === "upi"
+                                ? "bg-[#3E4B2F] text-white border-[#3E4B2F] shadow-sm"
+                                : "bg-white text-[#52633E] border-stone-200 hover:border-[#C9A84E]"
+                            }`}
+                          >
+                            <span>📱</span>
+                            <span>UPI</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPaymentMethod("pay_at_counter")}
+                            className={`p-2.5 rounded-xl border flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                              selectedPaymentMethod === "pay_at_counter"
+                                ? "bg-[#3E4B2F] text-white border-[#3E4B2F] shadow-sm"
+                                : "bg-white text-[#52633E] border-stone-200 hover:border-[#C9A84E]"
+                            }`}
+                          >
+                            <span>💰</span>
+                            <span>Counter</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPaymentMethod("card")}
+                            className={`p-2.5 rounded-xl border flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                              selectedPaymentMethod === "card"
+                                ? "bg-[#3E4B2F] text-white border-[#3E4B2F] shadow-sm"
+                                : "bg-white text-[#52633E] border-stone-200 hover:border-[#C9A84E]"
+                            }`}
+                          >
+                            <span>💳</span>
+                            <span>Card</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )
+                ) : (
+                  <div className="bg-[#FAF8F3] border border-[#C9A84E]/20 p-3.5 rounded-2xl text-[9px] uppercase tracking-widest text-[#52633E] text-center">
+                    <p className="font-bold text-[#26301C]">Order In Preparation</p>
+                    <p className="normal-case text-[10px] mt-0.5 text-stone-500">Payment option will be available once the kitchen marks your order completed.</p>
+                  </div>
+                )}
 
                 {/* Thank You Note */}
-                <div className="text-center space-y-1 pt-4">
+                <div className="text-center space-y-1 pt-2">
                   <p className="text-[10px] text-[#26301C] font-bold uppercase tracking-wider font-serif">Thank you for dining with Delish Cafe!</p>
                   <p className="text-[8px] text-[#52633E] uppercase tracking-widest">Powered by SmartMenu Digital Ordering Platform</p>
                 </div>
               </div>
 
               {/* Action Buttons */}
-              <div className="p-6 border-t border-[#F4EFE6] bg-[#FAF8F3] flex gap-3 justify-end print:hidden">
+              <div className="p-6 border-t border-[#F4EFE6] bg-[#FAF8F3] flex flex-wrap gap-2.5 justify-end items-center print:hidden">
                 <button
                   onClick={() => setSelectedBillOrder(null)}
-                  className="bg-white hover:bg-[#FAF8F3] text-[#26301C] border border-[#C9A84E]/30 px-6 py-3.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer"
+                  className="bg-white hover:bg-[#FAF8F3] text-[#26301C] border border-[#C9A84E]/30 px-5 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer"
                 >
                   Close
                 </button>
                 <button
                   onClick={handlePrintBill}
-                  className="bg-[#3E4B2F] hover:bg-[#323E25] text-white px-6 py-3.5 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer flex items-center gap-2 shadow-md hover:scale-105 border border-[#C9A84E]/30"
+                  className="bg-white hover:bg-stone-100 text-[#26301C] border border-[#C9A84E]/30 px-5 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer flex items-center gap-2"
                 >
-                  <Printer className="w-4 h-4" />
+                  <Printer className="w-4 h-4 text-[#C9A84E]" />
                   Print Bill
                 </button>
+                {selectedBillOrder.status?.toLowerCase() === "completed" && selectedBillOrder.paymentStatus !== "paid" && (
+                  <button
+                    onClick={handlePaySelectedBillOrder}
+                    disabled={isPayingOrder}
+                    className="bg-[#3E4B2F] hover:bg-[#323E25] text-white px-6 py-3 rounded-xl text-xs font-bold uppercase tracking-widest transition-all cursor-pointer flex items-center gap-2 shadow-md hover:scale-105 active:scale-95 border border-[#C9A84E]/30"
+                  >
+                    <CreditCard className="w-4 h-4 text-[#C9A84E]" />
+                    {isPayingOrder
+                      ? "Processing..."
+                      : selectedPaymentMethod === "pay_at_counter"
+                      ? `Pay at Counter (₹${selectedBillOrder.total})`
+                      : selectedPaymentMethod === "cod"
+                      ? `Confirm Cash on Delivery (₹${selectedBillOrder.total})`
+                      : `Pay ₹${selectedBillOrder.total}`}
+                  </button>
+                )}
               </div>
             </motion.div>
           </div>
@@ -3786,14 +4183,18 @@ export default function App() {
       <SessionBillModal
         isOpen={showSessionBillModal}
         onClose={() => setShowSessionBillModal(false)}
-        sessionId={currentDiningSessionId || customerSessionId}
+        sessionId={
+          currentDiningSessionId ||
+          allTables.find((t) => t.tableNumber === (activeTableLabel || qrLockedTable))?.activeSessionId ||
+          (activeTableLabel ? `table_${activeTableLabel}` : customerSessionId)
+        }
         tableNumber={activeTableLabel || qrLockedTable || "1"}
         onPaymentSuccess={() => {
           showToast("Bill settled! Table released.");
           setSessionRunningTotal(0);
           setTableNumber("");
           setActiveTableLabel("");
-          setCurrentDiningSessionId(null);
+          setCurrentDiningSessionId("");
           sessionStorage.removeItem("delish_current_session_id");
           sessionStorage.removeItem("delish_qr_table_locked");
           setIsQrLocked(false);
@@ -3802,7 +4203,7 @@ export default function App() {
       />
 
       {/* ================= FLOATING RUNNING BILL BUTTON FOR SEATED DINERS ================= */}
-      {!isAdminMode && orderType === "dine_in" && activeTableLabel && sessionRunningTotal > 0 && (
+      {!isAdminMode && isQrLocked && orderType === "dine_in" && activeTableLabel && activeTableTotal > 0 && (
         <motion.button
           initial={{ y: 20, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
@@ -3815,7 +4216,7 @@ export default function App() {
           </div>
           <div className="text-left">
             <span className="text-[9px] text-[#52633E] block font-bold">Table {activeTableLabel} Bill</span>
-            <span className="text-sm font-serif font-black text-[#3E4B2F]">₹{sessionRunningTotal}</span>
+            <span className="text-sm font-serif font-black text-[#3E4B2F]">₹{activeTableTotal}</span>
           </div>
         </motion.button>
       )}

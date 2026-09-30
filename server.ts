@@ -528,7 +528,7 @@ app.post("/api/orders/create", async (req, res) => {
     // Dine-in orders are initially UNPAID (added to running bill of session)
     const isDelivery = finalOrderType === "delivery";
     const initialPaymentStatus = isDelivery
-      ? (paymentId && paymentId !== "COUNTER_CASH" ? "paid" : "pending")
+      ? (paymentId && paymentId !== "COUNTER_CASH" && !paymentId.startsWith("COD_") ? "paid" : "pending")
       : "unpaid";
 
     const newOrder = {
@@ -613,8 +613,37 @@ app.get("/api/sessions/:sessionId/bill", async (req, res) => {
       } catch (e) {}
     }
 
+    // Check if sessionId is a table number (e.g., "2" or "Table 2")
     if (!session) {
-      return res.status(404).json({ success: false, error: "Dining session not found." });
+      const cleanTable = sessionId.replace(/[^0-9]/g, "");
+      const table = tableStateMap.get(cleanTable);
+      if (table && table.activeSessionId) {
+        session = sessionStateMap.get(table.activeSessionId);
+      }
+      if (!session) {
+        for (const s of sessionStateMap.values()) {
+          if ((s.tableId === cleanTable || s.tableId === sessionId) && s.status === "active") {
+            session = s;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!session) {
+      const cleanTable = sessionId.replace(/[^0-9]/g, "") || "1";
+      session = {
+        id: sessionId,
+        sessionId: sessionId,
+        tableId: cleanTable,
+        status: "active",
+        billStatus: "open",
+        paymentStatus: "unpaid",
+        startedAt: new Date().toISOString(),
+        closedAt: null,
+        total: 0,
+        orderIds: []
+      };
     }
 
     // Gather orders in this session
@@ -626,17 +655,42 @@ app.get("/api/sessions/:sessionId/bill", async (req, res) => {
         qSnap.forEach((d) => {
           const ord = d.data();
           if (ord.status !== "Cancelled") {
-            orders.push(ord);
+            orders.push({ id: d.id, ...ord });
           }
         });
+
+        // Also check if session has a tableId and fetch table orders if needed
+        if (orders.length === 0 && session.tableId) {
+          const qTable = query(
+            collection(db, "orders"),
+            where("tableNumber", "==", session.tableId),
+            where("orderType", "==", "dine_in")
+          );
+          const qTableSnap = await getDocs(qTable);
+          qTableSnap.forEach((d) => {
+            const ord = d.data();
+            if (ord.status !== "Cancelled" && ord.paymentStatus !== "paid") {
+              orders.push({ id: d.id, ...ord });
+            }
+          });
+        }
       } catch (e) {
         // Fallback to in-memory orders
-        processedOrders.forEach((o) => {
-          if (o.sessionId === sessionId && o.status !== "Cancelled") {
-            orders.push(o);
-          }
-        });
       }
+    }
+
+    if (orders.length === 0) {
+      processedOrders.forEach((o) => {
+        const oTable = (o.tableNumber || "").replace(/[^0-9]/g, "");
+        const targetTable = (session?.tableId || sessionId || "").replace(/[^0-9]/g, "");
+        if (
+          (o.sessionId === sessionId || (targetTable && oTable === targetTable)) &&
+          o.status !== "Cancelled" &&
+          o.paymentStatus !== "paid"
+        ) {
+          orders.push(o);
+        }
+      });
     }
 
     // Sort chronologically
@@ -777,7 +831,7 @@ app.post("/api/payment/verify", async (req, res) => {
     const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
 
     let isVerified = false;
-    if (!keySecret || razorpay_order_id?.startsWith("order_sim_") || razorpay_payment_id?.startsWith("PAY_SIM_")) {
+    if (!keySecret || razorpay_order_id?.startsWith("order_sim_") || razorpay_payment_id?.startsWith("PAY_SIM_") || razorpay_payment_id?.startsWith("COUNTER_") || razorpay_payment_id?.startsWith("COD_")) {
       // Test mode / simulated verification
       isVerified = true;
     } else {
@@ -803,14 +857,22 @@ app.post("/api/payment/verify", async (req, res) => {
 
     verifiedPayments.add(paymentKey);
 
-    // If payment was for a single delivery order
-    if (orderId && db) {
-      try {
-        await updateDoc(doc(db, "orders", orderId), {
-          paymentStatus: "paid",
-          paymentId: razorpay_payment_id
-        });
-      } catch (e) {}
+    // If payment was for a single order
+    if (orderId) {
+      if (db) {
+        try {
+          await updateDoc(doc(db, "orders", orderId), {
+            paymentStatus: "paid",
+            paymentId: razorpay_payment_id
+          });
+        } catch (e) {}
+      }
+      processedOrders.forEach((o) => {
+        if (o.id === orderId) {
+          o.paymentStatus = "paid";
+          o.paymentId = razorpay_payment_id;
+        }
+      });
     }
 
     // FINAL BILL SETTLEMENT FOR DINING SESSION:
@@ -839,6 +901,16 @@ app.post("/api/payment/verify", async (req, res) => {
           console.error("Error marking session orders paid:", e);
         }
       }
+
+      // Mark in processedOrders
+      processedOrders.forEach((o) => {
+        const oTable = (o.tableNumber || "").replace(/[^0-9]/g, "");
+        const cleanT = targetTable ? String(targetTable).replace(/[^0-9]/g, "") : "";
+        if (o.sessionId === sessionId || (cleanT && oTable === cleanT)) {
+          o.paymentStatus = "paid";
+          o.paymentId = razorpay_payment_id;
+        }
+      });
     }
 
     res.json({
