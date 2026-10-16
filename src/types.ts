@@ -1,10 +1,13 @@
 export interface MenuItem {
+  id?: string;
   name: string;
   price: number;
   desc: string;
   img: string;
   is_vegetarian: boolean;
   popularity_score: number;
+  available?: boolean;
+  category?: string;
 }
 
 export interface MenuCategory {
@@ -29,6 +32,7 @@ export interface Order {
   total: number;
   status: "Received" | "Preparing" | "Ready" | "Completed" | "Cancelled" | "Expired";
   createdAt: string;
+  createdIso?: string;
   paymentMethod?: string;
   paymentId?: string;
   paymentStatus?: "unpaid" | "pending" | "paid" | "failed" | "refunded";

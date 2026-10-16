@@ -34,7 +34,7 @@ import {
   CreditCard
 } from "lucide-react";
 import { menuData } from "./menuData";
-import { MenuItem, CartItem, Order, Reservation, DiningSession, DiningTable, UserRole } from "./types";
+import { MenuItem, MenuCategory, CartItem, Order, Reservation, DiningSession, DiningTable, UserRole } from "./types";
 import { DelishLogo } from "./components/DelishLogo";
 import { OrderPlacedModal } from "./components/OrderPlacedModal";
 import { SessionBillModal } from "./components/SessionBillModal";
@@ -113,19 +113,69 @@ export default function App() {
   const [currentUserRole, setCurrentUserRole] = useState<UserRole | null>(() => {
     return typeof window !== "undefined" ? (sessionStorage.getItem("delish_user_role") as UserRole) : null;
   });
-  const [activeAdminTab, setActiveAdminTab] = useState<"kitchen" | "tables" | "reservations" | "qr_codes">("kitchen");
+  const [activeAdminTab, setActiveAdminTab] = useState<"kitchen" | "tables" | "reservations" | "qr_codes" | "food">("kitchen");
   const [activeCategory, setActiveCategory] = useState<string>("Coffee");
   const [closingTableId, setClosingTableId] = useState<string | null>(null);
+
+  // Dynamic Menu State (supports owner food management: add, edit, delete, toggle availability)
+  const [categoriesData, setCategoriesData] = useState<MenuCategory[]>(() => {
+    if (typeof window === "undefined") return menuData;
+    try {
+      const saved = localStorage.getItem("delish_custom_menu");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return menuData;
+  });
+
+  // Food Management Modal & Filter States
+  const [showFoodModal, setShowFoodModal] = useState<boolean>(false);
+  const [editingFoodItem, setEditingFoodItem] = useState<{
+    originalName?: string;
+    name: string;
+    category: string;
+    price: number;
+    desc: string;
+    img: string;
+    is_vegetarian: boolean;
+    available: boolean;
+  } | null>(null);
+  const [foodSearchTerm, setFoodSearchTerm] = useState<string>("");
+  const [foodCategoryFilter, setFoodCategoryFilter] = useState<string>("All");
 
   // Hero slideshow state
   const [heroIndex, setHeroIndex] = useState<number>(0);
 
-  // Cart & Ordering States
-  const [cart, setCart] = useState<CartItem[]>([]);
+  // Cart & Ordering States (Initialized lazily from localStorage to guarantee persistence on reload)
+  const [cart, setCart] = useState<CartItem[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const sid = getCustomerSessionId();
+      const saved = localStorage.getItem(`delish_cart_${sid}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch (e) {
+      console.error("Error restoring initial cart:", e);
+    }
+    return [];
+  });
+  const isCartInitializedRef = useRef<boolean>(false);
+  const isSubmittingOrderRef = useRef<boolean>(false);
+  const [isSubmittingReservation, setIsSubmittingReservation] = useState<boolean>(false);
   const [isCartOpen, setIsCartOpen] = useState<boolean>(false);
   const [orderType, setOrderType] = useState<"dine_in" | "delivery">("delivery");
   const [tableNumber, setTableNumber] = useState<string>("");
   const [deliveryAddress, setDeliveryAddress] = useState<string>("");
+  const [customerName, setCustomerName] = useState<string>(() => {
+    return typeof window !== "undefined" ? localStorage.getItem("delish_customer_name") || "" : "";
+  });
+  const [customerPhone, setCustomerPhone] = useState<string>(() => {
+    return typeof window !== "undefined" ? localStorage.getItem("delish_customer_phone") || "" : "";
+  });
   const [activeTableLabel, setActiveTableLabel] = useState<string>("");
   const [isUrlTable, setIsUrlTable] = useState<boolean>(false);
   const [isQrLocked, setIsQrLocked] = useState<boolean>(false);
@@ -175,6 +225,7 @@ export default function App() {
   const [resGuests, setResGuests] = useState<number>(2);
   const [resName, setResName] = useState<string>("");
   const [resPhone, setResPhone] = useState<string>("");
+  const [slotUnavailableTables, setSlotUnavailableTables] = useState<string[]>([]);
   const [editReservationId, setEditReservationId] = useState<string | null>(null);
   const [isReservationModalOpen, setIsReservationModalOpen] = useState<boolean>(false);
   const [activeReservationTab, setActiveReservationTab] = useState<"book" | "manage">("book");
@@ -210,6 +261,10 @@ export default function App() {
 
   // Sync cart to isolated session storage whenever it updates
   useEffect(() => {
+    if (!isCartInitializedRef.current) {
+      isCartInitializedRef.current = true;
+      return;
+    }
     if (!customerSessionId) return;
     try {
       localStorage.setItem(`delish_cart_${customerSessionId}`, JSON.stringify(cart));
@@ -360,6 +415,28 @@ export default function App() {
         }
       })
       .catch(() => {});
+
+    // Listen for browser navigation (back/forward) URL state updates
+    const handlePopState = () => {
+      const p = new URLSearchParams(window.location.search);
+      const t = p.get("table");
+      if (t) {
+        const num = parseInt(t.replace(/[^0-9]/g, ""), 10);
+        if (!isNaN(num) && num >= 1 && num <= TOTAL_TABLES) {
+          const tStr = String(num);
+          setTableNumber(tStr);
+          setActiveTableLabel(tStr);
+          setIsUrlTable(true);
+          setIsQrLocked(true);
+          setQrLockedTable(tStr);
+          setOrderType("dine_in");
+        }
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+    };
   }, []);
 
   // Real-time Firestore sync with multi-user session isolation and live tables/sessions
@@ -404,85 +481,24 @@ export default function App() {
       console.warn("Firestore sessions init:", e);
     }
 
-    if (isAdminMode) {
-      // In Admin Mode: Staff/Kitchen needs to see all cafe orders & reservations
-      const qOrders = collection(db, "orders");
-      unsubscribeOrders = onSnapshot(
-        qOrders,
-        (snapshot) => {
-          const orders: Order[] = [];
-          snapshot.forEach((docSnap) => {
-            orders.push({ id: docSnap.id, ...docSnap.data() } as Order);
-          });
-          orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          setAllOrders(orders);
-        },
-        (error) => {
-          console.error("Firestore admin orders sync error:", error);
-        }
-      );
-
-      const qReservations = collection(db, "reservations");
-      unsubscribeReservations = onSnapshot(
-        qReservations,
-        (snapshot) => {
-          const reservations: Reservation[] = [];
-          snapshot.forEach((docSnap) => {
-            reservations.push({ id: docSnap.id, ...docSnap.data() } as Reservation);
-          });
-          reservations.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          setAllReservations(reservations);
-        },
-        (error) => {
-          console.error("Firestore admin reservations sync error:", error);
-        }
-      );
+    if (isAdminMode && authToken) {
+      // In Admin Mode: Authorized Cafe Owner syncs orders and active sessions via authenticated backend API
+      fetchOrdersAndReservations();
+      const interval = setInterval(() => {
+        fetchOrdersAndReservations();
+      }, 5000);
+      return () => {
+        clearInterval(interval);
+        unsubscribeTables();
+        unsubscribeSessions();
+      };
     } else {
-      // In Customer Mode: Multi-user session isolation.
-      // Customer listens to orders matching either their unique session or current table dining session
-      const qOrders = collection(db, "orders");
-      unsubscribeOrders = onSnapshot(
-        qOrders,
-        (snapshot) => {
-          const orders: Order[] = [];
-          snapshot.forEach((docSnap) => {
-            const data = docSnap.data();
-            // Match customerSessionId, currentDiningSessionId, activeTableLabel, or userOrderIds
-            if (
-              data.sessionId === customerSessionId ||
-              (currentDiningSessionId && data.sessionId === currentDiningSessionId) ||
-              (activeTableLabel && data.tableNumber === activeTableLabel && data.orderType === "dine_in") ||
-              userOrderIds.includes(docSnap.id)
-            ) {
-              const fullOrder = { id: docSnap.id, ...data } as Order;
-              orders.push(fullOrder);
-              // Live update selectedBillOrder if currently being viewed
-              setSelectedBillOrder((prev) => (prev?.id === docSnap.id ? fullOrder : prev));
-            }
-          });
-          orders.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          setAllOrders(orders);
-        },
-        (error) => {
-          console.error("Firestore customer orders sync error:", error);
-        }
-      );
-
-      const qReservations = collection(db, "reservations");
-      unsubscribeReservations = onSnapshot(
-        qReservations,
-        (snapshot) => {
-          const reservations: Reservation[] = [];
-          snapshot.forEach((docSnap) => {
-            reservations.push({ id: docSnap.id, ...docSnap.data() } as Reservation);
-          });
-          reservations.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          setAllReservations(reservations);
-        },
-        (error) => {
-          console.error("Firestore reservations sync error:", error);
-        }
-      );
+      // In Customer Mode: Live table availability is synchronized via public tables snapshot.
+      // Customer order state is scoped to the customer session and authoritative session bill.
+      return () => {
+        unsubscribeTables();
+        unsubscribeSessions();
+      };
     }
 
     return () => {
@@ -491,7 +507,7 @@ export default function App() {
       unsubscribeTables();
       unsubscribeSessions();
     };
-  }, [isAdminMode, customerSessionId, currentDiningSessionId, userOrderIds]);
+  }, [isAdminMode, customerSessionId, currentDiningSessionId, userOrderIds, activeTableLabel]);
 
   // Update order status if tracked order gets updated in list
   useEffect(() => {
@@ -514,7 +530,28 @@ export default function App() {
   }, [allOrders, currentOrder, isAdminMode]);
 
   const fetchOrdersAndReservations = async () => {
-    // Handled dynamically and immediately in real-time by onSnapshot!
+    if (!authToken) return;
+    try {
+      const [ordRes, sessRes] = await Promise.all([
+        fetch("/api/admin/orders/today", {
+          headers: { Authorization: `Bearer ${authToken}` }
+        }),
+        fetch("/api/sessions/active", {
+          headers: { Authorization: `Bearer ${authToken}` }
+        })
+      ]);
+      const ordData = await ordRes.json();
+      const sessData = await sessRes.json();
+      if (ordData.success && Array.isArray(ordData.orders)) {
+        setAllOrders(ordData.orders);
+      }
+      if (sessData.success) {
+        if (Array.isArray(sessData.tables)) setAllTables(sessData.tables);
+        if (Array.isArray(sessData.activeSessions)) setActiveSessions(sessData.activeSessions);
+      }
+    } catch (e) {
+      console.warn("Owner sync notice:", e);
+    }
   };
 
   const showToast = (msg: string) => {
@@ -542,6 +579,10 @@ export default function App() {
 
   // Cart operations (Direct item addition)
   const handleAddToCart = (item: MenuItem) => {
+    if (item.available === false) {
+      showToast(`${item.name} is currently sold out.`);
+      return;
+    }
     setCart((prev) => {
       const existing = prev.find((c) => c.name === item.name);
       if (existing) {
@@ -564,7 +605,7 @@ export default function App() {
           }
           return item;
         })
-        .filter((item) => item.quantity > 0);
+        .filter((item) => item.quantity > 0 && !isNaN(item.quantity));
     });
   };
 
@@ -573,8 +614,8 @@ export default function App() {
     showToast("Removed from cart.");
   };
 
-  const cartTotal = cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const cartItemCount = cart.reduce((sum, item) => sum + item.quantity, 0);
+  const cartTotal = cart.reduce((sum, item) => sum + (Number(item.price) || 0) * (Number(item.quantity) || 0), 0);
+  const cartItemCount = cart.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
 
   // Active table orders and calculated running total
   const activeTableOrders = allOrders.filter(
@@ -654,17 +695,22 @@ export default function App() {
     showToast("Table disconnected.");
   };
 
-  // Filter and Sort implementation
+  // Filter and Sort implementation using dynamic categoriesData
   const getFilteredItems = () => {
-    const categoryMatch = menuData.find((c) => c.category === activeCategory);
-    let items = categoryMatch ? [...categoryMatch.items] : [];
+    let items: MenuItem[] = [];
+    if (activeCategory === "All") {
+      items = categoriesData.flatMap((c) => c.items);
+    } else {
+      const categoryMatch = categoriesData.find((c) => c.category === activeCategory);
+      items = categoryMatch ? [...categoryMatch.items] : [];
+    }
 
     // Search term check
     if (searchTerm.trim()) {
       const term = searchTerm.toLowerCase();
       // Search across ALL categories if searching, to be highly friendly!
       const allMatched: MenuItem[] = [];
-      menuData.forEach((cat) => {
+      categoriesData.forEach((cat) => {
         cat.items.forEach((item) => {
           if (
             item.name.toLowerCase().includes(term) ||
@@ -697,32 +743,41 @@ export default function App() {
     return items;
   };
 
-  // Placing the order flow
+  // Placing the order flow with complete delivery & dine-in customer validation
   const handlePlaceOrderClick = async () => {
     if (cart.length === 0) {
       showToast("Your cart is empty!");
       return;
     }
     if (orderType === "dine_in") {
-      if (!isQrLocked) {
-        showToast("Dine-in is only available by scanning a table QR code.");
-        setOrderType("delivery");
-        return;
-      }
-      const targetT = qrLockedTable || activeTableLabel;
+      const targetT = qrLockedTable || activeTableLabel || tableNumber;
       const num = parseInt(targetT, 10);
       if (!targetT || isNaN(num) || num < 1 || num > TOTAL_TABLES) {
-        showToast("Invalid table QR code detected.");
+        showToast(`Please select a valid table (1 to ${TOTAL_TABLES}) for dine-in.`);
         return;
       }
-      // DINE-IN: Direct dispatch to kitchen without upfront payment!
-      setIsCartOpen(false);
-      await submitOrderToBackend("Dining Session Bill", "");
-      return;
-    }
-    if (orderType === "delivery" && !deliveryAddress.trim()) {
-      showToast("Delivery address is required!");
-      return;
+      // Ensure only dine-in valid payment method is selected (UPI or Pay at Counter)
+      if (selectedPaymentMethod !== "upi" && selectedPaymentMethod !== "pay_at_counter") {
+        setSelectedPaymentMethod("upi");
+      }
+    } else if (orderType === "delivery") {
+      if (!customerName.trim() || customerName.trim().length < 2) {
+        showToast("Please enter your full name for delivery.");
+        return;
+      }
+      const digits = customerPhone.replace(/[^0-9]/g, "");
+      if (digits.length < 10) {
+        showToast("Please enter a valid 10-digit mobile number for delivery.");
+        return;
+      }
+      if (!deliveryAddress.trim() || deliveryAddress.trim().length < 5) {
+        showToast("Please enter complete delivery address (minimum 5 characters).");
+        return;
+      }
+      // Ensure only delivery valid payment method is selected (UPI or COD)
+      if (selectedPaymentMethod !== "upi" && selectedPaymentMethod !== "cod") {
+        setSelectedPaymentMethod("upi");
+      }
     }
     setIsCartOpen(false);
     setShowSummaryModal(true);
@@ -735,7 +790,7 @@ export default function App() {
         setSelectedPaymentMethod("upi");
       }
     } else {
-      if (selectedPaymentMethod !== "upi" && selectedPaymentMethod !== "pay_at_counter" && selectedPaymentMethod !== "card") {
+      if (selectedPaymentMethod !== "upi" && selectedPaymentMethod !== "pay_at_counter") {
         setSelectedPaymentMethod("upi");
       }
     }
@@ -757,25 +812,28 @@ export default function App() {
   };
 
   const submitOrderToBackend = async (payMethod: string, payId: string) => {
-    if (isSubmittingOrder) return;
+    if (isSubmittingOrderRef.current || isSubmittingOrder) return;
+    isSubmittingOrderRef.current = true;
     setIsSubmittingOrder(true);
 
     const idempotencyKey = "req_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
-    const targetTable = isQrLocked ? (qrLockedTable || activeTableLabel) : "Delivery";
-    const targetOrderType = isQrLocked ? "dine_in" : "delivery";
+    const targetOrderType = orderType;
+    const targetTable = targetOrderType === "dine_in" ? (qrLockedTable || activeTableLabel || tableNumber) : "Delivery";
 
     const orderPayload = {
       idempotencyKey,
       tableNumber: targetOrderType === "dine_in" ? targetTable : "Delivery",
       orderType: targetOrderType,
-      deliveryAddress: targetOrderType === "delivery" ? deliveryAddress : "",
+      customerName: targetOrderType === "delivery" ? customerName.trim() : (resName.trim() || "Dine-In Guest"),
+      customerPhone: targetOrderType === "delivery" ? customerPhone.trim() : "",
+      deliveryAddress: targetOrderType === "delivery" ? deliveryAddress.trim() : "",
       items: cart,
       total: cartTotal,
       paymentMethod: payMethod,
       paymentId: payId,
       sessionId: currentDiningSessionId || customerSessionId,
-      isQrOrder: isQrLocked,
-      qrTable: qrLockedTable
+      isQrOrder: isQrLocked || isUrlTable,
+      qrTable: qrLockedTable || (targetOrderType === "dine_in" ? targetTable : "")
     };
 
     try {
@@ -866,10 +924,13 @@ export default function App() {
       }
     } finally {
       setIsSubmittingOrder(false);
+      isSubmittingOrderRef.current = false;
     }
   };
 
   const handleConfirmOrder = async () => {
+    if (isSubmittingOrderRef.current || isSubmittingOrder) return;
+
     if (selectedPaymentMethod === "cod") {
       await submitOrderToBackend("Cash on Delivery", "COD_" + Date.now());
       return;
@@ -946,12 +1007,21 @@ export default function App() {
         },
         theme: {
           color: "#3E4B2F" // Delish deep olive
+        },
+        modal: {
+          ondismiss: function () {
+            showToast("Payment cancelled by user.");
+            setIsSubmittingOrder(false);
+            isSubmittingOrderRef.current = false;
+          }
         }
       };
 
       const rzp = new (window as any).Razorpay(options);
       rzp.on("payment.failed", function (resp: any) {
-        showToast("Payment unsuccessful: " + resp.error.description);
+        showToast("Payment unsuccessful: " + (resp?.error?.description || "Payment failed"));
+        setIsSubmittingOrder(false);
+        isSubmittingOrderRef.current = false;
       });
       rzp.open();
     } catch (err: any) {
@@ -966,59 +1036,51 @@ export default function App() {
 
     try {
       if (selectedPaymentMethod === "cod") {
-        const codPayId = "COD_" + Date.now();
-        const verifyRes = await fetch("/api/payment/verify", {
+        const reqRes = await fetch("/api/orders/request-offline-payment", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            razorpay_payment_id: codPayId,
             orderId: selectedBillOrder.id,
-            sessionId: selectedBillOrder.sessionId,
-            tableNumber: selectedBillOrder.tableNumber
+            method: "Cash on Delivery"
           })
         });
-        const verifyData = await verifyRes.json();
-        if (verifyRes.ok && verifyData.success) {
+        const reqData = await reqRes.json();
+        if (reqRes.ok && reqData.success) {
           const updated: Order = {
             ...selectedBillOrder,
-            paymentStatus: "paid",
-            paymentMethod: "Cash on Delivery",
-            paymentId: codPayId
+            paymentStatus: "pending",
+            paymentMethod: "Cash on Delivery"
           };
           setSelectedBillOrder(updated);
           setAllOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
-          showToast("Settled with Cash on Delivery!");
+          showToast("Payment method set to Cash on Delivery (pending delivery collection).");
         } else {
-          showToast("Could not register payment status.");
+          showToast(reqData.error || "Could not register offline payment preference.");
         }
         return;
       }
 
       if (selectedPaymentMethod === "pay_at_counter") {
-        const counterPayId = "COUNTER_" + Date.now();
-        const verifyRes = await fetch("/api/payment/verify", {
+        const reqRes = await fetch("/api/orders/request-offline-payment", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            razorpay_payment_id: counterPayId,
             orderId: selectedBillOrder.id,
-            sessionId: selectedBillOrder.sessionId,
-            tableNumber: selectedBillOrder.tableNumber
+            method: "Pay at Counter"
           })
         });
-        const verifyData = await verifyRes.json();
-        if (verifyRes.ok && verifyData.success) {
+        const reqData = await reqRes.json();
+        if (reqRes.ok && reqData.success) {
           const updated: Order = {
             ...selectedBillOrder,
-            paymentStatus: "paid",
-            paymentMethod: "Cash at Counter",
-            paymentId: counterPayId
+            paymentStatus: "pending",
+            paymentMethod: "Pay at Counter"
           };
           setSelectedBillOrder(updated);
           setAllOrders((prev) => prev.map((o) => (o.id === updated.id ? updated : o)));
-          showToast("Bill settled at counter successfully!");
+          showToast("Payment method set to Pay at Counter (pending cashier collection).");
         } else {
-          showToast("Could not register counter payment.");
+          showToast(reqData.error || "Could not register offline payment preference.");
         }
         return;
       }
@@ -1136,10 +1198,25 @@ export default function App() {
     }
   };
 
-  // Reservation Flow
+  // Reservation Flow: Fetch slot availability without leaking any customer PII
+  useEffect(() => {
+    if (!resDate || !resTime) {
+      setSlotUnavailableTables([]);
+      return;
+    }
+    fetch(`/api/reservations/availability?date=${resDate}&time=${encodeURIComponent(resTime)}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success && Array.isArray(data.unavailableTables)) {
+          setSlotUnavailableTables(data.unavailableTables);
+        }
+      })
+      .catch((err) => console.warn("Slot availability lookup notice:", err));
+  }, [resDate, resTime]);
+
   const getUnavailableTables = () => {
     if (!resDate || !resTime) return [];
-    return allReservations
+    const fromMem = allReservations
       .filter(
         (r) =>
           r.status === "confirmed" &&
@@ -1148,55 +1225,104 @@ export default function App() {
           r.id !== editReservationId
       )
       .map((r) => r.table);
+    return Array.from(new Set([...slotUnavailableTables, ...fromMem]));
   };
 
   const handleBookTable = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingReservation) return;
+
     if (!resDate || !resTime || !resTable || !resName || !resPhone) {
       showToast("Please fill in all booking fields.");
       return;
     }
 
-    // Check for existing confirmed reservation on same table/date/time
-    const exists = allReservations.some(
-      (r) =>
-        r.status === "confirmed" &&
-        r.table === String(resTable) &&
-        r.date === resDate &&
-        r.time === resTime &&
-        r.id !== editReservationId
-    );
+    // Past date check
+    const today = new Date().toISOString().split("T")[0];
+    if (resDate < today) {
+      showToast("Please choose today or a future date for your reservation.");
+      return;
+    }
 
-    if (exists) {
+    // Past time slot check for today
+    if (resDate === today) {
+      const now = new Date();
+      const match = resTime.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+      if (match) {
+        let hours = parseInt(match[1], 10);
+        const minutes = parseInt(match[2], 10);
+        const ampm = match[3].toUpperCase();
+        if (ampm === "PM" && hours < 12) hours += 12;
+        if (ampm === "AM" && hours === 12) hours = 0;
+        const slotDate = new Date();
+        slotDate.setHours(hours, minutes, 0, 0);
+        if (slotDate.getTime() < now.getTime()) {
+          showToast("This time slot has already passed today. Please select an upcoming slot.");
+          return;
+        }
+      }
+    }
+
+    // Full name length check
+    if (resName.trim().length < 2) {
+      showToast("Please enter your full name.");
+      return;
+    }
+
+    // Phone number format validation (minimum 10 digits)
+    const digitsOnly = resPhone.replace(/[^0-9]/g, "");
+    if (digitsOnly.length < 10) {
+      showToast("Please enter a valid 10-digit mobile number.");
+      return;
+    }
+
+    // Guest count limits
+    const guestsNum = Number(resGuests);
+    if (isNaN(guestsNum) || guestsNum < 1 || guestsNum > 12) {
+      showToast("Please select between 1 and 12 guests.");
+      return;
+    }
+
+    // Check for existing confirmed reservation on same table/date/time
+    const isSlotOccupied = getUnavailableTables().includes(String(resTable));
+    if (isSlotOccupied) {
       showToast("Table already reserved for this date and time slot.");
       return;
     }
 
-    const resId = editReservationId || "RES-" + Math.random().toString(36).substring(2, 9).toUpperCase();
-    const savedReservation: Reservation = {
-      id: resId,
-      date: resDate,
-      time: resTime,
-      table: String(resTable),
-      guests: Number(resGuests),
-      name: resName,
-      phone: resPhone,
-      status: "confirmed" as const,
-      createdAt: new Date().toLocaleString("en-US", { hour12: true }),
-      sessionId: customerSessionId
-    };
+    setIsSubmittingReservation(true);
 
     try {
-      await setDoc(doc(db, "reservations", resId), savedReservation);
-      showToast(editReservationId ? "Reservation Updated!" : "Table Booked Successfully!");
-      if (!editReservationId) {
-        setUserReservationIds((prev) => {
-          const updated = [...prev, resId];
-          localStorage.setItem(`delish_res_${customerSessionId}`, JSON.stringify(updated));
-          return updated;
-        });
+      // Call atomic reservation API
+      const response = await fetch("/api/reservations/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date: resDate,
+          time: resTime,
+          table: String(resTable),
+          guests: guestsNum,
+          name: resName.trim(),
+          phone: resPhone.trim(),
+          sessionId: customerSessionId
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        showToast(data.error || "Failed to book reservation.");
+        return;
       }
-      // Reset Form
+
+      const resId = data.reservationId || data.reservation?.id;
+      showToast("Table Booked Successfully! View confirmation below.");
+      setUserReservationIds((prev) => {
+        const updated = [...prev, resId];
+        localStorage.setItem(`delish_res_${customerSessionId}`, JSON.stringify(updated));
+        return updated;
+      });
+
+      // Reset form
       setResDate("");
       setResTime("");
       setResTable("");
@@ -1204,11 +1330,172 @@ export default function App() {
       setResName("");
       setResPhone("");
       setEditReservationId(null);
-      setIsReservationModalOpen(false);
+
+      // Switch to "manage" (My Bookings) view so customer immediately sees their confirmed booking
+      setActiveReservationTab("manage");
     } catch (err: any) {
-      console.error("Firestore booking failed:", err);
-      showToast("Failed to book reservation: " + err.message);
+      console.warn("Reservation API fallback notice:", err);
+      try {
+        const resId = editReservationId || "RES-" + Math.random().toString(36).substring(2, 9).toUpperCase();
+        const savedReservation: Reservation = {
+          id: resId,
+          date: resDate,
+          time: resTime,
+          table: String(resTable),
+          guests: guestsNum,
+          name: resName.trim(),
+          phone: resPhone.trim(),
+          status: "confirmed" as const,
+          createdAt: new Date().toLocaleString("en-US", { hour12: true }),
+          sessionId: customerSessionId
+        };
+        await setDoc(doc(db, "reservations", resId), savedReservation);
+        showToast(editReservationId ? "Reservation Updated!" : "Table Booked Successfully!");
+        if (!editReservationId) {
+          setUserReservationIds((prev) => {
+            const updated = [...prev, resId];
+            localStorage.setItem(`delish_res_${customerSessionId}`, JSON.stringify(updated));
+            return updated;
+          });
+        }
+        setResDate("");
+        setResTime("");
+        setResTable("");
+        setResGuests(2);
+        setResName("");
+        setResPhone("");
+        setEditReservationId(null);
+        setActiveReservationTab("manage");
+      } catch (e: any) {
+        showToast("Failed to book reservation: " + e.message);
+      }
+    } finally {
+      setIsSubmittingReservation(false);
     }
+  };
+
+  // Food Management Handlers
+  const handleToggleFoodAvailability = (itemName: string) => {
+    setCategoriesData((prev) => {
+      const updated = prev.map((cat) => ({
+        ...cat,
+        items: cat.items.map((it) => {
+          if (it.name.toLowerCase() === itemName.toLowerCase()) {
+            const nextAvail = it.available === false ? true : false;
+            return { ...it, available: nextAvail };
+          }
+          return it;
+        })
+      }));
+      localStorage.setItem("delish_custom_menu", JSON.stringify(updated));
+      return updated;
+    });
+    showToast(`Updated availability for "${itemName}"`);
+  };
+
+  const handleDeleteFoodItem = (itemName: string) => {
+    setCategoriesData((prev) => {
+      const updated = prev.map((cat) => ({
+        ...cat,
+        items: cat.items.filter((it) => it.name.toLowerCase() !== itemName.toLowerCase())
+      }));
+      localStorage.setItem("delish_custom_menu", JSON.stringify(updated));
+      return updated;
+    });
+    showToast(`Deleted "${itemName}" from menu.`);
+  };
+
+  const handleSaveFoodItem = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingFoodItem) return;
+    const name = editingFoodItem.name.trim();
+    const catName = editingFoodItem.category.trim();
+    const price = Number(editingFoodItem.price);
+    const desc = editingFoodItem.desc.trim();
+    const img =
+      editingFoodItem.img.trim() ||
+      "https://images.unsplash.com/photo-1554118811-1e0d58224f24?w=800&auto=format&fit=crop&q=80";
+
+    if (!name || name.length < 2) {
+      showToast("Please enter a valid dish name.");
+      return;
+    }
+    if (!price || isNaN(price) || price <= 0) {
+      showToast("Price must be a valid positive amount.");
+      return;
+    }
+    if (!catName) {
+      showToast("Please select or enter a category.");
+      return;
+    }
+
+    setCategoriesData((prev) => {
+      const isEdit = Boolean(editingFoodItem.originalName);
+      let categoryFound = false;
+
+      let updated = prev.map((cat) => {
+        let newItems = [...cat.items];
+        if (isEdit && editingFoodItem.originalName) {
+          newItems = newItems.filter(
+            (i) => i.name.toLowerCase() !== editingFoodItem.originalName!.toLowerCase()
+          );
+        }
+        if (cat.category.toLowerCase() === catName.toLowerCase()) {
+          categoryFound = true;
+          newItems.push({
+            name,
+            price,
+            desc: desc || "Artisan cafe specialty prepared fresh to order.",
+            img,
+            is_vegetarian: editingFoodItem.is_vegetarian,
+            popularity_score: 92,
+            available: editingFoodItem.available !== false,
+            category: cat.category
+          });
+        }
+        return { ...cat, items: newItems };
+      });
+
+      if (!categoryFound) {
+        updated.push({
+          category: catName,
+          items: [
+            {
+              name,
+              price,
+              desc: desc || "Artisan cafe specialty prepared fresh to order.",
+              img,
+              is_vegetarian: editingFoodItem.is_vegetarian,
+              popularity_score: 92,
+              available: editingFoodItem.available !== false,
+              category: catName
+            }
+          ]
+        });
+      }
+
+      localStorage.setItem("delish_custom_menu", JSON.stringify(updated));
+
+      // Sync updated prices with backend catalog
+      const allItems = updated.flatMap((c) => c.items);
+      const token = authToken || (typeof window !== "undefined" ? sessionStorage.getItem("delish_auth_token") : "");
+      if (token) {
+        fetch("/api/admin/menu/sync", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({ items: allItems })
+        }).catch(() => {});
+      }
+
+      return updated;
+    });
+
+    showToast(editingFoodItem.originalName ? `Updated "${name}"` : `Added "${name}" to menu`);
+    setShowFoodModal(false);
+    setEditingFoodItem(null);
   };
 
   const handleEditReservation = (resv: Reservation) => {
@@ -1980,7 +2267,21 @@ export default function App() {
             <div className="space-y-8">
               {/* Category selector row */}
               <div className="flex items-center overflow-x-auto pb-4 gap-2.5 scrollbar-thin scrollbar-thumb-[#ECE4D4] scrollbar-track-transparent">
-                {menuData.map((category) => (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveCategory("All");
+                    setSearchTerm("");
+                  }}
+                  className={`px-6 py-3.5 rounded-2xl font-bold uppercase tracking-widest text-[11px] whitespace-nowrap transition-all border shrink-0 cursor-pointer ${
+                    activeCategory === "All" && !searchTerm
+                      ? "bg-[#3E4B2F] text-white border-[#3E4B2F] shadow-lg shadow-[#3E4B2F]/20 scale-105"
+                      : "bg-white text-[#52633E] border-[#C9A84E]/25 hover:text-[#26301C] hover:border-[#C9A84E]/50 shadow-sm"
+                  }`}
+                >
+                  🍽️ All Items
+                </button>
+                {categoriesData.map((category) => (
                   <button
                     key={category.category}
                     onClick={() => {
@@ -2005,6 +2306,7 @@ export default function App() {
                   <Search className="absolute left-4.5 top-1/2 -translate-y-1/2 text-[#52633E] w-4 h-4" />
                   <input
                     type="text"
+                    aria-label="Search Delish Cafe menu"
                     placeholder="Search coffees, pizzas, shakes, pasta..."
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
@@ -2012,6 +2314,8 @@ export default function App() {
                   />
                   {searchTerm && (
                     <button
+                      type="button"
+                      aria-label="Clear search query"
                       onClick={() => setSearchTerm("")}
                       className="absolute right-4.5 top-1/2 -translate-y-1/2 text-[#52633E] hover:text-[#26301C]"
                     >
@@ -2085,10 +2389,17 @@ export default function App() {
                             🌱 100% PURE VEG
                           </span>
                         </div>
-                        <div className="absolute top-4 right-4 bg-[#FAF8F3]/95 text-[#3E4B2F] border border-[#C9A84E]/40 font-bold text-[10px] px-2.5 py-1 rounded-lg shadow-md flex items-center gap-1 backdrop-blur-sm">
+                        <div className="absolute top-4 right-4 bg-[#FAF8F3]/95 text-[#3E4B2F] border border-[#C9A84E]/40 font-bold text-[10px] px-2.5 py-1 rounded-lg shadow-md flex items-center gap-1 backdrop-blur-sm z-20">
                           <Star className="w-3.5 h-3.5 fill-[#C9A84E] text-[#C9A84E]" />
                           <span>{item.popularity_score}</span>
                         </div>
+                        {item.available === false && (
+                          <div className="absolute inset-0 bg-stone-900/60 backdrop-blur-[2px] flex items-center justify-center z-10">
+                            <span className="bg-rose-600 text-white font-bold text-xs uppercase px-3.5 py-1.5 rounded-xl tracking-widest border border-rose-400 shadow-md">
+                              Currently Unavailable
+                            </span>
+                          </div>
+                        )}
                       </div>
 
                       <div className="p-6 space-y-4 flex-1 flex flex-col justify-between">
@@ -2107,10 +2418,21 @@ export default function App() {
                           </span>
                           <button
                             onClick={() => handleAddToCart(item)}
-                            className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-[10px] px-5 py-3.5 rounded-xl transition-all hover:scale-105 active:scale-95 cursor-pointer flex items-center gap-1.5 shadow-sm border border-[#C9A84E]/30"
+                            disabled={item.available === false}
+                            className={`font-bold uppercase tracking-widest text-[10px] px-5 py-3.5 rounded-xl transition-all flex items-center gap-1.5 shadow-sm border ${
+                              item.available === false
+                                ? "bg-stone-200 text-stone-500 border-stone-300 cursor-not-allowed"
+                                : "bg-[#3E4B2F] hover:bg-[#323E25] text-white border-[#C9A84E]/30 hover:scale-105 active:scale-95 cursor-pointer"
+                            }`}
                           >
-                            <Plus className="w-3.5 h-3.5" />
-                            Add to Tray
+                            {item.available === false ? (
+                              <span>Sold Out</span>
+                            ) : (
+                              <>
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>Add to Tray</span>
+                              </>
+                            )}
                           </button>
                         </div>
                       </div>
@@ -2907,6 +3229,17 @@ export default function App() {
               <QrCode className="w-4 h-4 text-[#C9A84E]" />
               QR Code Sheets
             </button>
+            <button
+              onClick={() => setActiveAdminTab("food")}
+              className={`px-5 py-2.5 rounded-xl font-bold uppercase tracking-wider text-xs transition-all flex items-center gap-2 cursor-pointer ${
+                activeAdminTab === "food"
+                  ? "bg-[#3E4B2F] text-white shadow-md border border-[#C9A84E]/40"
+                  : "bg-white text-[#52633E] border border-[#C9A84E]/25 hover:bg-[#F4EFE6]"
+              }`}
+            >
+              <Utensils className="w-4 h-4 text-[#C9A84E]" />
+              Food Management ({categoriesData.flatMap((c) => c.items).length} Dishes)
+            </button>
           </div>
 
           {/* TAB 1: KITCHEN PIPELINE */}
@@ -3207,7 +3540,7 @@ export default function App() {
                               </span>
                             </td>
                             <td className="py-2.5 px-3 text-stone-500 text-[10px]">
-                              {new Date(sess.startTime).toLocaleTimeString()}
+                              {new Date(sess.startTime || sess.startedAt || Date.now()).toLocaleTimeString()}
                             </td>
                             <td className="py-2.5 px-3 text-right">
                               <button
@@ -3364,6 +3697,186 @@ export default function App() {
                     </div>
                   );
                 })}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 5: FOOD & MENU MANAGEMENT */}
+          {activeAdminTab === "food" && (
+            <div className="bg-white border border-[#C9A84E]/25 rounded-3xl p-6 sm:p-8 shadow-md shadow-[#3E4B2F]/5 space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#F4EFE6] pb-5">
+                <div>
+                  <h3 className="text-xl font-serif font-bold uppercase tracking-wider text-[#26301C] flex items-center gap-2">
+                    <Utensils className="w-5 h-5 text-[#C9A84E]" />
+                    Delish Cafe Food & Menu Management
+                  </h3>
+                  <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">
+                    Add new dishes, update prices, change descriptions/images, toggle availability (Sold Out), or delete menu items.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingFoodItem({
+                      name: "",
+                      category: categoriesData[0]?.category || "Coffee",
+                      price: 150,
+                      desc: "",
+                      img: "",
+                      is_vegetarian: true,
+                      available: true
+                    });
+                    setShowFoodModal(true);
+                  }}
+                  className="bg-[#3E4B2F] hover:bg-[#323E25] text-white font-bold uppercase tracking-widest text-xs px-5 py-3 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 self-start sm:self-auto border border-[#C9A84E]/30 shadow-sm"
+                >
+                  <Plus className="w-4 h-4" />
+                  Add New Dish
+                </button>
+              </div>
+
+              {/* Filters for Food Management */}
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-[#FAF8F3] p-4 rounded-2xl border border-[#C9A84E]/25">
+                <div className="relative w-full sm:max-w-xs">
+                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#52633E]" />
+                  <input
+                    type="text"
+                    placeholder="Search dishes..."
+                    value={foodSearchTerm}
+                    onChange={(e) => setFoodSearchTerm(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2 text-xs border border-[#C9A84E]/30 rounded-xl bg-white font-bold text-[#26301C] focus:outline-none focus:border-[#3E4B2F]"
+                  />
+                </div>
+
+                <div className="flex items-center gap-2 overflow-x-auto w-full sm:w-auto">
+                  <button
+                    type="button"
+                    onClick={() => setFoodCategoryFilter("All")}
+                    className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider cursor-pointer transition-all ${
+                      foodCategoryFilter === "All"
+                        ? "bg-[#3E4B2F] text-white shadow-sm"
+                        : "bg-white text-[#52633E] border border-[#C9A84E]/25 hover:bg-[#FAF8F3]"
+                    }`}
+                  >
+                    All ({categoriesData.flatMap((c) => c.items).length})
+                  </button>
+                  {categoriesData.map((cat) => (
+                    <button
+                      key={cat.category}
+                      type="button"
+                      onClick={() => setFoodCategoryFilter(cat.category)}
+                      className={`px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider cursor-pointer whitespace-nowrap transition-all ${
+                        foodCategoryFilter === cat.category
+                          ? "bg-[#3E4B2F] text-white shadow-sm"
+                          : "bg-white text-[#52633E] border border-[#C9A84E]/25 hover:bg-[#FAF8F3]"
+                      }`}
+                    >
+                      {cat.category} ({cat.items.length})
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Dishes Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                {categoriesData
+                  .filter((cat) => foodCategoryFilter === "All" || cat.category === foodCategoryFilter)
+                  .flatMap((cat) => cat.items.map((it) => ({ ...it, categoryName: cat.category })))
+                  .filter((it) => {
+                    if (!foodSearchTerm.trim()) return true;
+                    const q = foodSearchTerm.toLowerCase();
+                    return it.name.toLowerCase().includes(q) || it.desc.toLowerCase().includes(q) || it.categoryName.toLowerCase().includes(q);
+                  })
+                  .map((item) => (
+                    <div
+                      key={item.name}
+                      className={`border rounded-2xl p-4 flex flex-col justify-between transition-all shadow-sm ${
+                        item.available === false
+                          ? "bg-stone-50 border-stone-300 opacity-75"
+                          : "bg-[#FAF8F3] border-[#C9A84E]/30 hover:border-[#3E4B2F]"
+                      }`}
+                    >
+                      <div className="space-y-3">
+                        <div className="flex gap-3 items-start">
+                          <img
+                            src={item.img}
+                            alt={item.name}
+                            className="w-16 h-16 rounded-xl object-cover shrink-0 border border-[#C9A84E]/30"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).src =
+                                "https://images.unsplash.com/photo-1554118811-1e0d58224f24?w=800&auto=format&fit=crop&q=80";
+                            }}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="text-[9px] font-bold text-[#C9A84E] uppercase tracking-wider truncate">
+                                {item.categoryName}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider shrink-0 ${
+                                  item.available === false
+                                    ? "bg-rose-100 text-rose-800 border border-rose-200"
+                                    : "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                                }`}
+                              >
+                                {item.available === false ? "Sold Out" : "Available"}
+                              </span>
+                            </div>
+                            <h4 className="font-serif font-bold text-sm text-[#26301C] uppercase tracking-tight truncate mt-0.5">
+                              {item.name}
+                            </h4>
+                            <p className="text-[#3E4B2F] font-bold text-xs font-mono mt-0.5">₹{item.price}</p>
+                          </div>
+                        </div>
+                        <p className="text-[10px] text-[#52633E] line-clamp-2 leading-relaxed">
+                          {item.desc}
+                        </p>
+                      </div>
+
+                      {/* Action buttons */}
+                      <div className="pt-3 mt-3 border-t border-[#C9A84E]/20 flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleFoodAvailability(item.name)}
+                          className={`flex-1 py-1.5 rounded-lg text-[9px] font-bold uppercase tracking-wider cursor-pointer border transition-all ${
+                            item.available === false
+                              ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                              : "bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100"
+                          }`}
+                        >
+                          {item.available === false ? "Mark Available" : "Mark Sold Out"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingFoodItem({
+                              originalName: item.name,
+                              name: item.name,
+                              category: item.categoryName,
+                              price: item.price,
+                              desc: item.desc,
+                              img: item.img,
+                              is_vegetarian: item.is_vegetarian,
+                              available: item.available !== false
+                            });
+                            setShowFoodModal(true);
+                          }}
+                          className="px-2.5 py-1.5 bg-white text-[#3E4B2F] hover:bg-[#FAF8F3] border border-[#C9A84E]/30 rounded-lg text-[9px] font-bold uppercase cursor-pointer"
+                          title="Edit dish"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteFoodItem(item.name)}
+                          className="px-2.5 py-1.5 bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200 rounded-lg text-[9px] font-bold uppercase cursor-pointer"
+                          title="Delete dish"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
               </div>
             </div>
           )}
@@ -3643,48 +4156,138 @@ export default function App() {
                   <span className="font-serif text-sm">Grand Total Amount</span>
                   <span className="text-2xl text-[#3E4B2F] font-serif font-black italic">₹{cartTotal}</span>
                 </div>
-                {/* Dining Option: Direct Access = Delivery Only | Valid QR Access = Dine-in Table */}
-                {!isQrLocked ? (
-                  <div className="bg-white rounded-xl p-3.5 border border-[#C9A84E]/30 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#52633E]">Dining Option:</span>
-                      <span className="px-2.5 py-1 rounded-lg text-[9px] font-bold bg-[#3E4B2F] text-white uppercase tracking-wider flex items-center gap-1 shadow-sm">
-                        <span>🏠</span> Delivery
-                      </span>
-                    </div>
-
-                    <div className="space-y-1.5 pt-1 border-t border-stone-100">
-                      <label className="text-[9px] font-bold uppercase tracking-wider text-[#52633E] block">
-                        Ahmedabad Delivery Address:
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="House/flat no, street, landmark, area..."
-                        value={deliveryAddress}
-                        onChange={(e) => setDeliveryAddress(e.target.value)}
-                        className="w-full px-3 py-2 text-xs border border-[#C9A84E]/30 rounded-lg bg-[#FAF8F3] font-bold text-[#26301C] focus:outline-none focus:border-[#3E4B2F]"
-                      />
+                {/* Dining Option Toggle: Delivery <-> Dine-In */}
+                <div className="bg-white rounded-xl p-3.5 border border-[#C9A84E]/30 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#52633E]">Dining Preference:</span>
+                    <div className="inline-flex rounded-lg border border-[#C9A84E]/30 p-0.5 bg-[#FAF8F3]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOrderType("delivery");
+                          if (selectedPaymentMethod !== "upi" && selectedPaymentMethod !== "cod") {
+                            setSelectedPaymentMethod("upi");
+                          }
+                        }}
+                        className={`px-2.5 py-1 rounded-md text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer ${
+                          orderType === "delivery"
+                            ? "bg-[#3E4B2F] text-white shadow-sm"
+                            : "text-[#52633E] hover:text-[#26301C]"
+                        }`}
+                      >
+                        🏠 Delivery
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOrderType("dine_in");
+                          if (!activeTableLabel && !tableNumber) {
+                            setTableNumber("1");
+                            setActiveTableLabel("1");
+                          }
+                          if (selectedPaymentMethod !== "upi" && selectedPaymentMethod !== "pay_at_counter") {
+                            setSelectedPaymentMethod("upi");
+                          }
+                        }}
+                        className={`px-2.5 py-1 rounded-md text-[9px] font-bold uppercase tracking-wider transition-all cursor-pointer ${
+                          orderType === "dine_in"
+                            ? "bg-[#3E4B2F] text-white shadow-sm"
+                            : "text-[#52633E] hover:text-[#26301C]"
+                        }`}
+                      >
+                        🍽️ Dine-In
+                      </button>
                     </div>
                   </div>
-                ) : (
-                  <div className="bg-white rounded-xl p-3.5 border border-[#C9A84E]/30 space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#52633E]">Dining Preference:</span>
-                      <span className="px-2.5 py-1 rounded-lg text-[9px] font-bold bg-[#3E4B2F] text-white uppercase tracking-wider flex items-center gap-1 shadow-sm">
-                        <span>🪑</span> Dine-In
-                      </span>
-                    </div>
 
-                    <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between text-xs text-amber-900 font-bold">
-                      <span className="flex items-center gap-1.5">
-                        <span className="text-sm">🔒</span> Table {qrLockedTable || activeTableLabel} Locked via QR
-                      </span>
-                      <span className="text-[9px] bg-amber-200/80 text-amber-900 px-2 py-0.5 rounded-full uppercase tracking-wider font-bold">
-                        Verified Table
-                      </span>
+                  {orderType === "delivery" ? (
+                    <div className="space-y-2 pt-1 border-t border-stone-100">
+                      <div>
+                        <label className="text-[9px] font-bold uppercase tracking-wider text-[#52633E] block mb-1">
+                          Full Name:
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Your Full Name"
+                          value={customerName}
+                          onChange={(e) => {
+                            setCustomerName(e.target.value);
+                            localStorage.setItem("delish_customer_name", e.target.value);
+                          }}
+                          className="w-full px-3 py-2 text-xs border border-[#C9A84E]/30 rounded-lg bg-[#FAF8F3] font-bold text-[#26301C] focus:outline-none focus:border-[#3E4B2F]"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[9px] font-bold uppercase tracking-wider text-[#52633E] block mb-1">
+                          Mobile Phone (10 Digits):
+                        </label>
+                        <input
+                          type="tel"
+                          placeholder="9876543210"
+                          value={customerPhone}
+                          onChange={(e) => {
+                            setCustomerPhone(e.target.value);
+                            localStorage.setItem("delish_customer_phone", e.target.value);
+                          }}
+                          className="w-full px-3 py-2 text-xs border border-[#C9A84E]/30 rounded-lg bg-[#FAF8F3] font-bold text-[#26301C] focus:outline-none focus:border-[#3E4B2F]"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[9px] font-bold uppercase tracking-wider text-[#52633E] block mb-1">
+                          Ahmedabad Delivery Address:
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="House/flat no, street, landmark, area..."
+                          value={deliveryAddress}
+                          onChange={(e) => {
+                            setDeliveryAddress(e.target.value);
+                            localStorage.setItem(`delish_addr_${customerSessionId}`, e.target.value);
+                          }}
+                          className="w-full px-3 py-2 text-xs border border-[#C9A84E]/30 rounded-lg bg-[#FAF8F3] font-bold text-[#26301C] focus:outline-none focus:border-[#3E4B2F]"
+                        />
+                      </div>
                     </div>
-                  </div>
-                )}
+                  ) : (
+                    <div className="space-y-2 pt-1 border-t border-stone-100">
+                      {isQrLocked ? (
+                        <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between text-xs text-amber-900 font-bold">
+                          <span className="flex items-center gap-1.5">
+                            <span className="text-sm">🔒</span> 🍽️ Dine-In &bull; Table {qrLockedTable || activeTableLabel}
+                          </span>
+                          <span className="text-[9px] bg-amber-200/80 text-amber-900 px-2 py-0.5 rounded-full uppercase tracking-wider font-bold">
+                            QR Verified
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <label className="text-[9px] font-bold uppercase tracking-wider text-[#52633E] block">
+                              Select Table (1 to {TOTAL_TABLES}):
+                            </label>
+                            <span className="text-[9px] font-bold text-[#3E4B2F]">
+                              🍽️ Dine-In &bull; Table {activeTableLabel || tableNumber || "1"}
+                            </span>
+                          </div>
+                          <select
+                            value={activeTableLabel || tableNumber || "1"}
+                            onChange={(e) => handleSetTable(e.target.value)}
+                            className="w-full px-3 py-2 text-xs border border-[#C9A84E]/30 rounded-lg bg-[#FAF8F3] font-bold text-[#26301C] focus:outline-none focus:border-[#3E4B2F] cursor-pointer"
+                          >
+                            {Array.from({ length: TOTAL_TABLES }, (_, idx) => {
+                              const numStr = String(idx + 1);
+                              return (
+                                <option key={numStr} value={numStr}>
+                                  Table {numStr}
+                                </option>
+                              );
+                            })}
+                          </select>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
 
                 <button
                   onClick={handlePlaceOrderClick}
@@ -3793,8 +4396,8 @@ export default function App() {
                 <h2 className="text-2xl font-serif font-bold uppercase tracking-tight text-[#26301C]">Select Payment Method</h2>
                 <p className="text-xs text-[#52633E] uppercase tracking-wider mt-1 font-semibold">
                   {orderType === "delivery"
-                    ? "UPI and Cash on Delivery are available for doorstep delivery."
-                    : "UPI, Pay at Counter, and Credit/Debit Card are available."}
+                    ? "Cash on Delivery and UPI are available for doorstep delivery."
+                    : "UPI and Pay at Counter are available for table dine-in."}
                 </p>
               </div>
 
@@ -3827,12 +4430,12 @@ export default function App() {
                   </button>
                 </div>
               ) : (
-                /* QR-BASED DINE-IN: Show ONLY UPI, PAY AT COUNTER, Credit/Debit Card */
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                /* DINE-IN: Show ONLY UPI and PAY AT COUNTER */
+                <div className="grid grid-cols-2 gap-4">
                   <button
                     type="button"
                     onClick={() => setSelectedPaymentMethod("upi")}
-                    className={`p-4 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
+                    className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
                       selectedPaymentMethod === "upi"
                         ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm ring-1 ring-[#3E4B2F]"
                         : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
@@ -3844,7 +4447,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setSelectedPaymentMethod("pay_at_counter")}
-                    className={`p-4 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
+                    className={`p-4.5 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
                       selectedPaymentMethod === "pay_at_counter"
                         ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm ring-1 ring-[#3E4B2F]"
                         : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
@@ -3852,18 +4455,6 @@ export default function App() {
                   >
                     <span className="text-2xl">💰</span>
                     <span className="text-[10px] font-bold">Pay at Counter</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedPaymentMethod("card")}
-                    className={`p-4 rounded-2xl border text-center flex flex-col items-center justify-center gap-2 transition-all cursor-pointer uppercase tracking-widest ${
-                      selectedPaymentMethod === "card"
-                        ? "bg-[#FAF8F3] border-[#3E4B2F] text-[#3E4B2F] font-bold shadow-sm ring-1 ring-[#3E4B2F]"
-                        : "bg-[#FAF8F3]/50 border-stone-200 hover:border-[#C9A84E] text-[#52633E]"
-                    }`}
-                  >
-                    <span className="text-2xl">💳</span>
-                    <span className="text-[10px] font-bold">Credit/Debit Card</span>
                   </button>
                 </div>
               )}
@@ -4052,8 +4643,8 @@ export default function App() {
                           </button>
                         </div>
                       ) : (
-                        /* QR-BASED DINE-IN: Show ONLY UPI, PAY AT COUNTER, Credit/Debit Card */
-                        <div className="grid grid-cols-3 gap-2 text-center text-[10px] font-bold uppercase tracking-wider">
+                        /* DINE-IN: Show ONLY UPI and PAY AT COUNTER */
+                        <div className="grid grid-cols-2 gap-2 text-center text-[10px] font-bold uppercase tracking-wider">
                           <button
                             type="button"
                             onClick={() => setSelectedPaymentMethod("upi")}
@@ -4076,19 +4667,7 @@ export default function App() {
                             }`}
                           >
                             <span>💰</span>
-                            <span>Counter</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setSelectedPaymentMethod("card")}
-                            className={`p-2.5 rounded-xl border flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                              selectedPaymentMethod === "card"
-                                ? "bg-[#3E4B2F] text-white border-[#3E4B2F] shadow-sm"
-                                : "bg-white text-[#52633E] border-stone-200 hover:border-[#C9A84E]"
-                            }`}
-                          >
-                            <span>💳</span>
-                            <span>Card</span>
+                            <span>Pay at Counter</span>
                           </button>
                         </div>
                       )}
